@@ -98,7 +98,7 @@ async function main(): Promise<number> {
 
   // ── Step 4: Optional update ───────────────────────────────────────
   step(4, TOTAL_STEPS, "อัปเดท version ใหม่ (ถ้าต้องการ)");
-  if (await confirm("ต้องการอัปเดท JHCIS เป็น version ใหม่?", false)) {
+  if (await confirm("ต้องการอัปเดท JHCIS เป็น version ใหม่?", true)) {
     await runUpdater();
   } else {
     info("ข้ามการอัปเดท");
