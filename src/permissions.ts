@@ -29,17 +29,34 @@ function runIcacls(args: string[]): Promise<number> {
   });
 }
 
+// Well-known SIDs - language-independent (*S-1-... is the icacls syntax for SIDs).
+// BUILTIN\Users (everyone who can log on locally) - what shows up as "Users" in
+// the Security tab regardless of Windows display language.
+const SID_BUILTIN_USERS = "*S-1-5-32-545";
+const SID_BUILTIN_ADMINISTRATORS = "*S-1-5-32-544";
+
 export async function grantFullPermissions(installPath: string): Promise<boolean> {
   if (!existsSync(installPath)) {
     err(`ไม่พบโฟลเดอร์: ${installPath}`);
     return false;
   }
-  const user = process.env.USERNAME ?? "Users";
-  info(`อัปเดท permission สำหรับ ${installPath} (user: ${user})`);
+  const user = process.env.USERNAME ?? "";
+  info(`อัปเดท permission สำหรับ ${installPath}`);
 
-  const code = await runIcacls([installPath, "/grant", `${user}:(OI)(CI)F`, "/T", "/C", "/Q"]);
+  const grants = [
+    `${SID_BUILTIN_USERS}:(OI)(CI)F`,          // Users group - Full Control
+    `${SID_BUILTIN_ADMINISTRATORS}:(OI)(CI)F`, // Administrators - Full Control
+  ];
+  if (user) grants.push(`${user}:(OI)(CI)F`);  // Current user - Full Control
+
+  const args = [installPath, "/T", "/C", "/Q"];
+  for (const g of grants) {
+    args.push("/grant", g);
+  }
+
+  const code = await runIcacls(args);
   if (code === 0) {
-    ok(`อัปเดท permission สำหรับ user "${user}" สำเร็จ (Full Control)`);
+    ok(`อัปเดท permission สำเร็จ - Users / Administrators${user ? ` / ${user}` : ""} ได้ Full Control`);
     return true;
   }
 

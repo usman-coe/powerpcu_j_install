@@ -1,9 +1,5 @@
-import {
-  findClientInstaller,
-  findUpdater,
-  runClientInstaller,
-  runUpdater,
-} from "./src/installer";
+import { ensureElevated } from "./src/elevation";
+import { runClientInstaller, runUpdater } from "./src/installer";
 import {
   DEFAULT_INSTALL_PATH,
   detectInstallPath,
@@ -19,14 +15,9 @@ const TOTAL_STEPS = 4;
 async function main(): Promise<number> {
   banner();
 
-  // Sanity check: warn if installer files not present
-  if (!findClientInstaller()) {
-    err("ไม่พบไฟล์ติดตั้ง JHCIS Client");
-    info(
-      "วาง .exe ตัวนี้ไว้ในโฟลเดอร์เดียวกับ JHCIS-install-jre_jdk_64 หรือ jHCIS-All-PCU",
-    );
-    await pause();
-    return 1;
+  if (!(await ensureElevated())) {
+    // A new elevated process has been launched; exit this one quietly.
+    return 0;
   }
 
   console.log(
@@ -107,16 +98,10 @@ async function main(): Promise<number> {
 
   // ── Step 4: Optional update ───────────────────────────────────────
   step(4, TOTAL_STEPS, "อัปเดท version ใหม่ (ถ้าต้องการ)");
-  const updaterPath = findUpdater();
-  if (!updaterPath) {
-    warn("ไม่พบไฟล์ JHCIS_Update.exe - ข้ามการอัปเดท");
+  if (await confirm("ต้องการอัปเดท JHCIS เป็น version ใหม่?", false)) {
+    await runUpdater();
   } else {
-    info(`เจอ updater: ${updaterPath}`);
-    if (await confirm("ต้องการอัปเดท JHCIS เป็น version ใหม่?", false)) {
-      await runUpdater();
-    } else {
-      info("ข้ามการอัปเดท");
-    }
+    info("ข้ามการอัปเดท");
   }
 
   console.log(

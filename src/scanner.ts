@@ -1,6 +1,6 @@
 import net from "node:net";
 import os from "node:os";
-import { color, info, ok, warn } from "./ui";
+import { color, info, progress, warn } from "./ui";
 
 export interface MysqlServer {
   host: string;
@@ -84,22 +84,41 @@ export async function scanLan(port: number): Promise<MysqlServer[]> {
     info(
       `สแกน subnet ${color.cyan}${sub.base}0/24${color.reset} ผ่าน ${color.cyan}${sub.iface}${color.reset} (local=${sub.localIp})`,
     );
-    const tasks: Promise<MysqlServer | null>[] = [];
+
+    const hosts: string[] = [];
     for (let i = 1; i <= sub.size; i++) {
       const host = `${sub.base}${i}`;
       if (host === sub.localIp) continue;
-      tasks.push(probeMysql(host, port));
+      hosts.push(host);
     }
-    const results = await Promise.all(tasks);
-    for (const r of results) {
-      if (r && !found.has(r.host)) {
-        found.set(r.host, r);
-        ok(
-          `พบ MySQL ที่ ${color.bold}${r.host}:${r.port}${color.reset}` +
-            (r.versionHint ? ` (version: ${r.versionHint})` : ""),
-        );
-      }
-    }
+
+    const total = hosts.length;
+    let done = 0;
+    let lastHost = "";
+    const bar = progress();
+    bar.update(0, total, "เริ่มสแกน...");
+
+    const tasks = hosts.map((host) =>
+      probeMysql(host, port).then((r) => {
+        done++;
+        lastHost = host;
+        if (r && !found.has(r.host)) {
+          found.set(r.host, r);
+          bar.log(
+            `${color.green}[✓]${color.reset} พบ MySQL ที่ ${color.bold}${r.host}:${r.port}${color.reset}` +
+              (r.versionHint ? ` ${color.gray}(${r.versionHint})${color.reset}` : ""),
+          );
+        }
+        bar.update(done, total, `${lastHost.padEnd(15)}  พบ ${found.size}`);
+        return r;
+      }),
+    );
+
+    await Promise.all(tasks);
+    bar.done();
+    info(
+      `สแกน ${total} ip ใน ${sub.base}0/24 เสร็จแล้ว - พบ ${color.bold}${found.size}${color.reset} เครื่อง`,
+    );
   }
   return [...found.values()];
 }

@@ -1,6 +1,11 @@
 import { spawn } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
+import os from "node:os";
 import path from "node:path";
+import clientInstallerEmbed from "../JHCIS-install-jre_jdk_64/jHCIS-All-PCU/jhcis-install-client-jre8-0-191_64.exe" with {
+  type: "file",
+};
+import updaterEmbed from "../JHCIS_Update.exe" with { type: "file" };
 import { err, info, ok, warn } from "./ui";
 
 export interface RunResult {
@@ -9,14 +14,12 @@ export interface RunResult {
 }
 
 export function resolveBaseDir(): string {
-  // When compiled with `bun build --compile`, process.execPath is the .exe path.
-  // When running via `bun run`, use cwd.
   const exePath = process.execPath;
   const isCompiled = !exePath.toLowerCase().endsWith("bun.exe");
   return isCompiled ? path.dirname(exePath) : process.cwd();
 }
 
-export function findFile(relativeCandidates: string[]): string | null {
+function findExternalFile(relativeCandidates: string[]): string | null {
   const base = resolveBaseDir();
   const cwd = process.cwd();
   const roots = [base, cwd, path.join(base, ".."), path.join(cwd, "..")];
@@ -29,16 +32,37 @@ export function findFile(relativeCandidates: string[]): string | null {
   return null;
 }
 
-export function findClientInstaller(): string | null {
-  return findFile([
+let extractDir: string | null = null;
+function getExtractDir(): string {
+  if (extractDir) return extractDir;
+  extractDir = path.join(os.tmpdir(), `jhcis-installer-${process.pid}`);
+  mkdirSync(extractDir, { recursive: true });
+  return extractDir;
+}
+
+async function extractEmbedded(embeddedPath: string, fileName: string): Promise<string> {
+  const outDir = getExtractDir();
+  const outPath = path.join(outDir, fileName);
+  if (existsSync(outPath)) return outPath;
+  info(`กำลังเตรียมไฟล์ติดตั้ง: ${fileName} ...`);
+  await Bun.write(outPath, Bun.file(embeddedPath));
+  return outPath;
+}
+
+export async function locateClientInstaller(): Promise<string> {
+  const external = findExternalFile([
     "JHCIS-install-jre_jdk_64\\jHCIS-All-PCU\\jhcis-install-client-jre8-0-191_64.exe",
     "jHCIS-All-PCU\\jhcis-install-client-jre8-0-191_64.exe",
     "jhcis-install-client-jre8-0-191_64.exe",
   ]);
+  if (external) return external;
+  return await extractEmbedded(clientInstallerEmbed, "jhcis-install-client-jre8-0-191_64.exe");
 }
 
-export function findUpdater(): string | null {
-  return findFile(["JHCIS_Update.exe", "..\\JHCIS_Update.exe"]);
+export async function locateUpdater(): Promise<string> {
+  const external = findExternalFile(["JHCIS_Update.exe", "..\\JHCIS_Update.exe"]);
+  if (external) return external;
+  return await extractEmbedded(updaterEmbed, "JHCIS_Update.exe");
 }
 
 export function runProcess(exePath: string, args: string[] = []): Promise<RunResult> {
@@ -63,22 +87,21 @@ export function runProcess(exePath: string, args: string[] = []): Promise<RunRes
 }
 
 export async function runClientInstaller(): Promise<RunResult> {
-  const exe = findClientInstaller();
-  if (!exe) {
-    err(
-      "ไม่พบไฟล์ jhcis-install-client-jre8-0-191_64.exe\n" +
-        "  กรุณาวางไฟล์ .exe ตัวนี้ไว้ในโฟลเดอร์เดียวกับ JHCIS-install-jre_jdk_64",
-    );
+  try {
+    const exe = await locateClientInstaller();
+    return runProcess(exe);
+  } catch (e) {
+    err(`เตรียมตัวติดตั้งไม่สำเร็จ: ${(e as Error).message}`);
     return { ok: false, exitCode: -1 };
   }
-  return runProcess(exe);
 }
 
 export async function runUpdater(): Promise<RunResult> {
-  const exe = findUpdater();
-  if (!exe) {
-    err("ไม่พบไฟล์ JHCIS_Update.exe");
+  try {
+    const exe = await locateUpdater();
+    return runProcess(exe);
+  } catch (e) {
+    err(`เตรียม updater ไม่สำเร็จ: ${(e as Error).message}`);
     return { ok: false, exitCode: -1 };
   }
-  return runProcess(exe);
 }

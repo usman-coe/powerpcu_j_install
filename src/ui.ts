@@ -58,6 +58,53 @@ export async function confirm(question: string, def = true): Promise<boolean> {
   return ans === "y" || ans === "yes" || ans === "ใช่";
 }
 
+export interface Progress {
+  update: (done: number, total: number, label?: string) => void;
+  log: (line: string) => void;
+  done: () => void;
+}
+
+export function progress(prefix = ""): Progress {
+  let lastWidth = 0;
+  const tty = !!process.stdout.isTTY;
+
+  const clear = () => {
+    if (lastWidth > 0) {
+      process.stdout.write("\r" + " ".repeat(lastWidth) + "\r");
+      lastWidth = 0;
+    }
+  };
+
+  const draw = (done: number, total: number, label = "") => {
+    if (!tty) return;
+    const pct = total === 0 ? 0 : Math.floor((done / total) * 100);
+    const barWidth = 24;
+    const filled = Math.floor((pct / 100) * barWidth);
+    const bar =
+      color.green + "█".repeat(filled) + color.gray + "░".repeat(barWidth - filled) + color.reset;
+    const counter = `${done.toString().padStart(3)}/${total}`;
+    const line =
+      `${prefix}${color.cyan}[${counter}]${color.reset} ${bar} ${pct.toString().padStart(3)}% ` +
+      (label ? `${color.gray}${label}${color.reset}` : "");
+    // Strip ANSI for width calculation
+    const visible = line.replace(/\x1b\[[0-9;]*m/g, "");
+    clear();
+    process.stdout.write(line);
+    lastWidth = visible.length;
+  };
+
+  return {
+    update: draw,
+    log: (line: string) => {
+      clear();
+      console.log(line);
+    },
+    done: () => {
+      clear();
+    },
+  };
+}
+
 export async function pause(msg = "กด Enter เพื่อปิดหน้าต่าง..."): Promise<void> {
   process.stdout.write(`\n${color.gray}${msg}${color.reset} `);
   await readLine();
