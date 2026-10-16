@@ -1,4 +1,4 @@
-import { ensureElevated } from "./src/elevation";
+import { ensureElevated, isCompiledExe } from "./src/elevation";
 import { runClientInstaller, runUpdater } from "./src/installer";
 import {
   DEFAULT_INSTALL_PATH,
@@ -6,6 +6,13 @@ import {
   grantFullPermissions,
 } from "./src/permissions";
 import { scanLan, type MysqlServer } from "./src/scanner";
+import { ensureUtf8Console } from "./src/console";
+import {
+  alreadyRelaunchedInWt,
+  hasWindowsTerminal,
+  isInWindowsTerminal,
+  relaunchInWindowsTerminal,
+} from "./src/terminal";
 import { ask, banner, color, confirm, err, info, ok, pause, step, warn } from "./src/ui";
 
 const DEFAULT_PORT = 3333;
@@ -13,6 +20,21 @@ const DEFAULT_PASSWORD = "123456";
 const TOTAL_STEPS = 4;
 
 async function main(): Promise<number> {
+  ensureUtf8Console();
+
+  // conhost can't shape Thai combining marks. If we're in conhost and Windows
+  // Terminal is available, relaunch there so สระ/วรรณยุกต์ stack correctly.
+  if (
+    isCompiledExe() &&
+    !isInWindowsTerminal() &&
+    !alreadyRelaunchedInWt() &&
+    hasWindowsTerminal()
+  ) {
+    process.stdout.write("Opening Windows Terminal for Thai display...\n");
+    relaunchInWindowsTerminal();
+    return 0;
+  }
+
   banner();
 
   if (!(await ensureElevated())) {

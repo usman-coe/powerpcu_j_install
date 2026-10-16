@@ -6,11 +6,12 @@
   "scripts": {
     "start": "bun run index.ts",
     "typecheck": "tsc --noEmit",
-    "build": "bun build --compile --target=bun-windows-x64 --minify --sourcemap --outfile dist/jhcis-installer.exe ./index.ts"
+    "build": "bun run scripts/build.ts"
   },
   "devDependencies": {
     "@types/bun": "latest",
-    "@types/node": "^25.6.0"
+    "@types/node": "^25.6.0",
+    "rcedit": "^5.0.2"
   },
   "peerDependencies": {
     "typescript": "^5"
