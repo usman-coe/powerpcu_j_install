@@ -6,6 +6,7 @@ import {
   grantFullPermissions,
 } from "./src/permissions";
 import { scanLan, type MysqlServer } from "./src/scanner";
+import { disableJavaUpdate } from "./src/java";
 import { ensureUtf8Console } from "./src/console";
 import {
   alreadyRelaunchedInWt,
@@ -17,7 +18,7 @@ import { ask, banner, color, confirm, err, info, ok, pause, step, warn } from ".
 
 const DEFAULT_PORT = 3333;
 const DEFAULT_PASSWORD = "123456";
-const TOTAL_STEPS = 5;
+const TOTAL_STEPS = 6;
 
 async function main(): Promise<number> {
   ensureUtf8Console();
@@ -48,7 +49,8 @@ async function main(): Promise<number> {
       `  2. ติดตั้ง JHCIS Client\n` +
       `  3. อัปเดท permission ของโฟลเดอร์ที่ติดตั้ง\n` +
       `  4. (ถ้าต้องการ) อัปเดท version ใหม่ของ JHCIS\n` +
-      `  5. วาง getdown.txt แก้ปัญหาเปิดโปรแกรมไม่ได้\n`,
+      `  5. วาง getdown.txt แก้ปัญหาเปิดโปรแกรมไม่ได้\n` +
+      `  6. ปิด Java auto-update (JHCIS ต้องใช้ JRE 1.8)\n`,
   );
 
   if (!(await confirm("เริ่มกระบวนการติดตั้ง?", true))) {
@@ -131,6 +133,10 @@ async function main(): Promise<number> {
   // After the updater, since it may write its own getdown.txt.
   step(5, TOTAL_STEPS, "วาง getdown.txt (แก้ปัญหาเปิด JHCIS ไม่ได้)");
   await fixGetdown(installPath);
+
+  // ── Step 6: Disable Java auto-update ──────────────────────────────
+  step(6, TOTAL_STEPS, "ปิด Java auto-update");
+  await disableJavaUpdate();
 
   console.log(
     `\n${color.bold}${color.green}✔ การติดตั้งเสร็จสิ้น${color.reset}\n` +
