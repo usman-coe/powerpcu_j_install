@@ -1,5 +1,5 @@
 import { ensureElevated, isCompiledExe } from "./src/elevation";
-import { runClientInstaller, runUpdater } from "./src/installer";
+import { fixGetdown, runClientInstaller, runUpdater } from "./src/installer";
 import {
   DEFAULT_INSTALL_PATH,
   detectInstallPath,
@@ -17,7 +17,7 @@ import { ask, banner, color, confirm, err, info, ok, pause, step, warn } from ".
 
 const DEFAULT_PORT = 3333;
 const DEFAULT_PASSWORD = "123456";
-const TOTAL_STEPS = 4;
+const TOTAL_STEPS = 5;
 
 async function main(): Promise<number> {
   ensureUtf8Console();
@@ -47,7 +47,8 @@ async function main(): Promise<number> {
       `  1. ค้นหา MySQL server ของ JHCIS ในวงแลน (port ${DEFAULT_PORT})\n` +
       `  2. ติดตั้ง JHCIS Client\n` +
       `  3. อัปเดท permission ของโฟลเดอร์ที่ติดตั้ง\n` +
-      `  4. (ถ้าต้องการ) อัปเดท version ใหม่ของ JHCIS\n`,
+      `  4. (ถ้าต้องการ) อัปเดท version ใหม่ของ JHCIS\n` +
+      `  5. วาง getdown.txt แก้ปัญหาเปิดโปรแกรมไม่ได้\n`,
   );
 
   if (!(await confirm("เริ่มกระบวนการติดตั้ง?", true))) {
@@ -125,6 +126,11 @@ async function main(): Promise<number> {
   } else {
     info("ข้ามการอัปเดท");
   }
+
+  // ── Step 5: getdown.txt fix ───────────────────────────────────────
+  // After the updater, since it may write its own getdown.txt.
+  step(5, TOTAL_STEPS, "วาง getdown.txt (แก้ปัญหาเปิด JHCIS ไม่ได้)");
+  await fixGetdown(installPath);
 
   console.log(
     `\n${color.bold}${color.green}✔ การติดตั้งเสร็จสิ้น${color.reset}\n` +

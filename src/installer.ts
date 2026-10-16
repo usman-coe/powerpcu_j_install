@@ -1,11 +1,12 @@
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import clientInstallerEmbed from "../JHCIS-install-jre_jdk_64/jHCIS-All-PCU/jhcis-install-client-jre8-0-191_64.exe" with {
   type: "file",
 };
 import updaterEmbed from "../JHCIS_Update.exe" with { type: "file" };
+import getdownEmbed from "./getdown.txt" with { type: "text" };
 import { err, info, ok, warn } from "./ui";
 
 export interface RunResult {
@@ -93,6 +94,35 @@ export async function runClientInstaller(): Promise<RunResult> {
   } catch (e) {
     err(`เตรียมตัวติดตั้งไม่สำเร็จ: ${(e as Error).message}`);
     return { ok: false, exitCode: -1 };
+  }
+}
+
+// ประกาศ 26 ก.พ. 69: วิธีอัปเดตใหม่ทำให้บางเครื่องเปิด JHCIS ไม่ได้ แก้โดยวาง getdown.txt นี้ทับในโฟลเดอร์ติดตั้ง
+const GETDOWN_URL = "https://jhcis.moph.go.th/files/getdown.txt";
+
+export async function fixGetdown(installPath: string): Promise<boolean> {
+  if (!existsSync(installPath)) {
+    err(`ไม่พบโฟลเดอร์: ${installPath}`);
+    return false;
+  }
+  let text = getdownEmbed;
+  try {
+    const r = await fetch(GETDOWN_URL, { signal: AbortSignal.timeout(10_000) });
+    const remote = r.ok ? await r.text() : "";
+    if (remote.includes("appbase")) text = remote;
+    else warn("ไฟล์ getdown.txt จากเว็บไม่ถูกต้อง - ใช้ไฟล์ที่แนบมากับโปรแกรมแทน");
+  } catch {
+    warn("ดาวน์โหลด getdown.txt ไม่ได้ (ไม่มีอินเทอร์เน็ต?) - ใช้ไฟล์ที่แนบมากับโปรแกรมแทน");
+  }
+  const target = path.join(installPath, "getdown.txt");
+  try {
+    if (existsSync(target)) copyFileSync(target, `${target}.bak`);
+    writeFileSync(target, text);
+    ok(`วาง getdown.txt ที่ ${target} แล้ว`);
+    return true;
+  } catch (e) {
+    err(`เขียน getdown.txt ไม่สำเร็จ: ${(e as Error).message}`);
+    return false;
   }
 }
 
