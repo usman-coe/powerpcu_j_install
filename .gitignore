@@ -32,3 +32,10 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 
 # Finder (MacOS) folder config
 .DS_Store
+
+# bun compile leftovers
+*.bun-build
+
+# Official JHCIS installers (download from https://jhcis.moph.go.th/download/)
+JHCIS-install-jre_jdk_64/
+JHCIS_Update.exe
