@@ -191,6 +191,45 @@ function Write-Log {
 #endregion
 
 #region Pure
+function Get-AppKind([string]$DisplayName) {
+    if ($DisplayName -imatch 'JHCIS.*Client') { return 'client' }
+    if ($DisplayName -imatch 'JHCIS.*Server') { return 'server' }
+    if ($DisplayName -imatch '^Java(\(TM\))?\s+(\d|SE Development Kit)' -and $DisplayName -inotmatch 'Auto Updater') { return 'java' }
+    return $null
+}
+function Get-SilentUninstallCommand([string]$UninstallString) {
+    if ($UninstallString -imatch 'msiexec.*?(\{[0-9A-F-]+\})') {
+        return [pscustomobject]@{ FilePath = 'msiexec.exe'; Arguments = "/x $($Matches[1]) /qb /norestart" }
+    }
+    $exe = $UninstallString.Replace('"', '').Trim()
+    if ($exe -imatch '\.exe$') {
+        return [pscustomobject]@{ FilePath = $exe; Arguments = '/S _?=' + (Split-Path $exe) }
+    }
+    return $null
+}
+function Get-MysqlVersionFromHandshake([byte[]]$Bytes) {
+    if ($Bytes.Length -lt 6 -or $Bytes[4] -ne 0x0A) { return $null }
+    $end = [Array]::IndexOf($Bytes, [byte]0, 5)
+    if ($end -le 5) { return $null }
+    return [Text.Encoding]::ASCII.GetString($Bytes, 5, $end - 5)
+}
+function Test-GetdownContent([string]$Text) {
+    return ($Text -match 'appbase\s*=') -and ($Text -notmatch '<html')
+}
+function Test-FileSha256([string]$Path, [string]$Expected) {
+    try { return (Get-FileHash -Path $Path -Algorithm SHA256).Hash -ieq $Expected } catch { return $false }
+}
+function ConvertTo-Port([string]$Text) {
+    $n = 0
+    if ([int]::TryParse($Text, [ref]$n) -and $n -ge 1 -and $n -le 65535) { return $n }
+    return $Script:DefaultPort
+}
+function Get-IpFromServerText([string]$Text) {
+    return ($Text.Trim() -split '\s+')[0]
+}
+function Get-LanHosts([string]$Base, [string]$LocalIp) {
+    return [string[]]@(1..254 | ForEach-Object { "$Base$_" } | Where-Object { $_ -ne $LocalIp })
+}
 #endregion
 
 #region System
@@ -206,6 +245,56 @@ function Invoke-SelfTest {
     $Script:Failed = 0
     Assert-Equal $(Write-Log info 'selftest'; 1) 1 'Write-Log does not throw'
     Assert-True ($Script:Payload.Client.Sha256.Length -eq 64) 'config sha length'
+    Assert-Equal (Get-AppKind 'Java 8 Update 191 (64-bit)') 'java' 'kind java'
+    Assert-Equal (Get-AppKind 'Java SE Development Kit 8 Update 191 (64-bit)') 'java' 'kind jdk'
+    Assert-Equal (Get-AppKind 'Java(TM) 8 Update 191') 'java' 'kind java(tm)'
+    Assert-Equal (Get-AppKind 'Java Auto Updater') $null 'kind auto updater excluded'
+    Assert-Equal (Get-AppKind 'JHCIS-Client-JRE-8.0.191_64bit 3.0.0') 'client' 'kind client'
+    Assert-Equal (Get-AppKind 'JHCIS-Server-JRE-8.0.191_64bit 3.0.0') 'server' 'kind server'
+    Assert-Equal (Get-AppKind 'MySQL Server 5.6') $null 'kind other'
+
+    $u = Get-SilentUninstallCommand 'MsiExec.exe /X{26A24AE4-039D-4CA4-87B4-2F64180191F0}'
+    Assert-Equal $u.FilePath 'msiexec.exe' 'msi filepath'
+    Assert-Equal $u.Arguments '/x {26A24AE4-039D-4CA4-87B4-2F64180191F0} /qb /norestart' 'msi args'
+    $u = Get-SilentUninstallCommand 'msiexec /i{26a24ae4-039d-4ca4-87b4-2f64180191f0}'
+    Assert-Equal $u.Arguments '/x {26a24ae4-039d-4ca4-87b4-2f64180191f0} /qb /norestart' 'msi lowercase guid'
+    $u = Get-SilentUninstallCommand '"C:\Program Files\jhcis-client\uninst.exe"'
+    Assert-Equal $u.FilePath 'C:\Program Files\jhcis-client\uninst.exe' 'nsis filepath unquoted'
+    Assert-Equal $u.Arguments '/S _?=C:\Program Files\jhcis-client' 'nsis args'
+    Assert-Equal (Get-SilentUninstallCommand 'C:\x\uninst.exe /S') $null 'nsis with trailing args -> null'
+    Assert-Equal (Get-SilentUninstallCommand 'rundll32 something') $null 'unknown -> null'
+
+    $hs = [byte[]](0x4A,0,0,0,0x0A) + [Text.Encoding]::ASCII.GetBytes('5.6.45-log') + [byte[]](0,1,2,3)
+    Assert-Equal (Get-MysqlVersionFromHandshake $hs) '5.6.45-log' 'handshake version'
+    Assert-Equal (Get-MysqlVersionFromHandshake ([Text.Encoding]::ASCII.GetBytes('HTTP/1.1 400'))) $null 'handshake non-mysql'
+    Assert-Equal (Get-MysqlVersionFromHandshake ([byte[]](1,2,3))) $null 'handshake too short'
+
+    Assert-True (Test-GetdownContent "# x`nappbase = https://7-sada.github.io/jhcis-update/`n") 'getdown ok'
+    Assert-True (-not (Test-GetdownContent '<html><body>404 Not Found</body></html>')) 'getdown html rejected'
+    Assert-True (-not (Test-GetdownContent '')) 'getdown empty rejected'
+
+    $tmp = Join-Path $env:TEMP ("sha-{0}.txt" -f [guid]::NewGuid()); [IO.File]::WriteAllText($tmp, 'abc')
+    Assert-True (Test-FileSha256 $tmp 'BA7816BF8F01CFEA414140DE5DAE2223B00361A396177A9CB410FF61F20015AD') 'sha match (upper)'
+    Assert-True (Test-FileSha256 $tmp 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad') 'sha match (lower)'
+    Assert-True (-not (Test-FileSha256 $tmp ('0'*64))) 'sha mismatch'
+    Assert-True (-not (Test-FileSha256 "$tmp.missing" ('0'*64))) 'sha missing file -> false'
+    Remove-Item $tmp
+
+    Assert-Equal (ConvertTo-Port '3306') 3306 'port ok'
+    Assert-Equal (ConvertTo-Port '') 3333 'port empty'
+    Assert-Equal (ConvertTo-Port 'abc') 3333 'port text'
+    Assert-Equal (ConvertTo-Port '70000') 3333 'port out of range'
+    Assert-Equal (ConvertTo-Port '0') 3333 'port zero'
+
+    Assert-Equal (Get-IpFromServerText '192.168.1.10 (5.6.45-log)') '192.168.1.10' 'ip from combo text'
+    Assert-Equal (Get-IpFromServerText '  10.0.0.5  ') '10.0.0.5' 'ip trimmed'
+    Assert-Equal (Get-IpFromServerText '') '' 'ip empty'
+
+    $hosts = Get-LanHosts '192.168.1.' '192.168.1.37'
+    Assert-Equal $hosts.Count 253 'lan hosts count'
+    Assert-Equal $hosts[0] '192.168.1.1' 'lan first'
+    Assert-Equal $hosts[-1] '192.168.1.254' 'lan last'
+    Assert-True ($hosts -notcontains '192.168.1.37') 'lan excludes self'
     Write-Host "$($Script:Failed) failed"
     exit ([int]($Script:Failed -ne 0))
 }
