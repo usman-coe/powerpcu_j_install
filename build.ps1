@@ -18,7 +18,12 @@ if ($LASTEXITCODE -ne 0) { throw "SelfTest failed (exit $LASTEXITCODE)" }
 
 # 3. ps2exe
 if (-not (Get-Module -ListAvailable ps2exe)) {
-    Install-Module ps2exe -Scope CurrentUser -Force
+    try {
+        Install-PackageProvider NuGet -MinimumVersion 2.8.5.201 -Force -Scope CurrentUser | Out-Null
+        Install-Module ps2exe -Scope CurrentUser -Force -Confirm:$false
+    } catch {
+        throw "Cannot install ps2exe automatically ($($_.Exception.Message)). Run 'Install-Module ps2exe -Scope CurrentUser' once by hand, then re-run build.ps1."
+    }
 }
 Import-Module ps2exe
 

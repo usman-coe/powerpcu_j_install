@@ -33,7 +33,7 @@ Log อยู่ที่ `jhcis-installer.log` ข้าง exe
 powershell -ExecutionPolicy Bypass -File .\build.ps1
 ```
 
-ผลลัพธ์อยู่ใน `dist\` (`jhcis-installer.exe`, `jhcis-installer.ps1`, `run.cmd`) build.ps1 รัน self-test ก่อน และติดตั้ง ps2exe ให้เองถ้ายังไม่มี
+ผลลัพธ์อยู่ใน `dist\` (`jhcis-installer.exe`, `jhcis-installer.ps1`, `run.cmd`) build.ps1 รัน self-test ก่อน และพยายามติดตั้ง ps2exe ให้อัตโนมัติถ้ายังไม่มี ถ้าติดตั้งไม่สำเร็จหรือมีข้อความถามค้าง ให้รัน `Install-Module ps2exe -Scope CurrentUser` เองครั้งเดียวก่อน
 
 ## ทดสอบ
 
