@@ -4,7 +4,7 @@
 
 ## โปรแกรมนี้ทำอะไร
 
-ทำ 6 ขั้นตอนต่อเนื่องในหน้าต่างเดียว:
+ทำ 7 ขั้นตอนต่อเนื่องในหน้าต่างเดียว:
 
 1. ค้นหา MySQL server ในวงแลน (port 3333)
 2. ถอน JHCIS Client / Java ตัวเดิม
@@ -12,6 +12,7 @@
 4. ตั้ง permission โฟลเดอร์ (`icacls` ให้ Users/Administrators เป็น Full Control)
 5. อัปเดต version ใหม่ (`JHCIS_Update.exe`)
 6. วาง `getdown.txt` และปิด Java auto-update
+7. สร้าง shortcut JHCIS บน Desktop: `JHCIS` เปิดทันที, `JHCIS (ตรวจอัปเดต)` เช็ค version ก่อน; ลบ shortcut เดิมที่ชี้เข้าโฟลเดอร์ jhcis-client บน Desktop
 
 ใช้กับเครื่อง client เท่านั้น ถ้าตรวจพบ JHCIS-Server ในเครื่อง โปรแกรมจะเตือน
 
@@ -63,3 +64,7 @@ payload ปัจจุบัน: tag `payload-2026-10` มี `jhcis-install-cl
 
 - [Spec](docs/superpowers/specs/2026-10-30-powershell-winforms-rewrite-design.md)
 - [Plan](docs/superpowers/plans/2026-10-30-powershell-winforms-rewrite.md)
+
+## Credit
+
+พัฒนาโดย PowerPCU (usman kareemee) · github.com/usman-coe/powerpcu_j_install

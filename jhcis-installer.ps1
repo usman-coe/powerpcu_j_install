@@ -7,7 +7,8 @@ Add-Type -AssemblyName System.Windows.Forms, System.Drawing
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
 #region Config
-$Script:Version = '2.0.0'
+$Script:Version = '2.1.0'
+$Script:Credit = 'พัฒนาโดย PowerPCU (usman kareemee) · github.com/usman-coe/powerpcu_j_install'
 $Script:PayloadTag = 'payload-2026-10'
 $Script:PayloadBase = "https://github.com/usman-coe/powerpcu_j_install/releases/download/$($Script:PayloadTag)"
 $Script:Payload = @{
@@ -511,6 +512,50 @@ function Disable-JavaUpdate {
     Write-Log ok 'ปิด Java auto-update แล้ว (คง JRE 1.8 ไว้สำหรับ JHCIS)'
     return $true
 }
+
+function Set-JhcisShortcuts([string]$InstallPath, [string[]]$DesktopDirs = $null, [string]$PublicDesktop = $null) {
+    try {
+        $InstallPath = $InstallPath.Trim().TrimEnd('\')
+        $jar = Join-Path $InstallPath 'JHCIS_Launcher.jar'
+        $bat = Join-Path $InstallPath 'JHCIS_Launcher.bat'
+        if (-not (Test-Path -LiteralPath $jar -PathType Leaf) -or -not (Test-Path -LiteralPath $bat -PathType Leaf)) {
+            Write-Log err "ไม่พบ JHCIS_Launcher.jar / JHCIS_Launcher.bat ใน $InstallPath - ข้ามการสร้าง shortcut"
+            return $false
+        }
+        if (-not $PublicDesktop) { $PublicDesktop = Join-Path $env:PUBLIC 'Desktop' }
+        if (-not $DesktopDirs) {
+            $DesktopDirs = @($PublicDesktop) + @(Get-ChildItem -LiteralPath (Split-Path $env:PUBLIC) -Directory -ErrorAction SilentlyContinue |
+                ForEach-Object { Join-Path $_.FullName 'Desktop' } | Where-Object { Test-Path -LiteralPath $_ -PathType Container }) | Select-Object -Unique
+        }
+        $sh = New-Object -ComObject WScript.Shell
+        foreach ($dir in $DesktopDirs) {
+            foreach ($file in @(Get-ChildItem -LiteralPath $dir -Filter *.lnk -ErrorAction SilentlyContinue)) {
+                try {
+                    $t = $sh.CreateShortcut($file.FullName).TargetPath
+                    if ($t -and ($t -ieq $InstallPath -or $t.StartsWith($InstallPath + '\', [StringComparison]::OrdinalIgnoreCase))) {
+                        Remove-Item -LiteralPath $file.FullName -Force
+                        Write-Log info "ลบ shortcut เดิม: $($file.FullName)"
+                    }
+                } catch { Write-Log warn "อ่าน/ลบ shortcut ไม่ได้: $($file.FullName)" }
+            }
+        }
+        if (-not (Test-Path -LiteralPath $PublicDesktop -PathType Container)) { [void](New-Item -ItemType Directory -Path $PublicDesktop -Force) }
+        $ico = Join-Path $InstallPath 'logo.ico'
+        foreach ($s in @(@('JHCIS.lnk', $jar, 'เปิด JHCIS ทันที (ไม่ตรวจ version ใหม่)'), @('JHCIS (ตรวจอัปเดต).lnk', $bat, 'ตรวจ version ใหม่ก่อนแล้วเปิด JHCIS'))) {
+            $l = $sh.CreateShortcut((Join-Path $PublicDesktop $s[0]))
+            $l.TargetPath = $s[1]
+            $l.WorkingDirectory = $InstallPath
+            $l.Description = $s[2]
+            if (Test-Path -LiteralPath $ico -PathType Leaf) { $l.IconLocation = "$InstallPath\logo.ico,0" }
+            [void]$l.Save()
+        }
+        Write-Log ok "สร้าง shortcut 'JHCIS' และ 'JHCIS (ตรวจอัปเดต)' บน Desktop แล้ว"
+        return $true
+    } catch {
+        Write-Log err "สร้าง shortcut ไม่สำเร็จ: $($_.Exception.Message)"
+        return $false
+    }
+}
 #endregion
 
 #region SelfTest
@@ -674,6 +719,25 @@ function Invoke-SelfTest {
     $sw.Restart(); $r = Resolve-PayloadFile -Name 'stall.bin' -Sha256 ('0'*64) -Size 10 -Url "$surl/s" -SearchDirs @() -DownloadDir $sd -StallTimeoutMs 1500; $ms = $sw.ElapsedMilliseconds
     Assert-True ($null -eq $r -and $ms -lt 4000 -and -not (Test-Path (Join-Path $sd 'stall.bin.part'))) "payload stall watchdog -> null, no .part ($ms ms)"
     $sl.Stop(); Remove-Item $sd -Recurse -Force
+    $inst = Join-Path $env:TEMP ("jhcis-sc-{0}" -f [guid]::NewGuid()); New-Item -ItemType Directory $inst | Out-Null
+    foreach ($f in 'JHCIS_Launcher.jar','JHCIS_Launcher.bat','logo.ico') { [IO.File]::WriteAllText((Join-Path $inst $f), 'x') }
+    $desk = Join-Path $env:TEMP ("jhcis-desk-{0}" -f [guid]::NewGuid()); New-Item -ItemType Directory $desk | Out-Null
+    $wsh = New-Object -ComObject WScript.Shell
+    $old = $wsh.CreateShortcut((Join-Path $desk 'JHCIS-Client.lnk')); $old.TargetPath = (Join-Path $inst 'jhcis.jar'); $old.Save()
+    $oth = $wsh.CreateShortcut((Join-Path $desk 'Notepad.lnk')); $oth.TargetPath = (Join-Path $env:SystemRoot 'notepad.exe'); $oth.Save()
+    Assert-True (Set-JhcisShortcuts $inst -DesktopDirs @($desk) -PublicDesktop $desk) 'shortcuts created'
+    Assert-True (-not (Test-Path (Join-Path $desk 'JHCIS-Client.lnk'))) 'old jhcis shortcut removed'
+    Assert-True (Test-Path (Join-Path $desk 'Notepad.lnk')) 'unrelated shortcut kept'
+    $n1 = $wsh.CreateShortcut((Join-Path $desk 'JHCIS.lnk'))
+    Assert-Equal $n1.TargetPath (Join-Path $inst 'JHCIS_Launcher.jar') 'shortcut jar target'
+    Assert-Equal $n1.WorkingDirectory $inst 'shortcut jar workdir'
+    Assert-Equal $n1.IconLocation "$inst\logo.ico,0" 'shortcut jar icon'
+    $n2 = $wsh.CreateShortcut((Join-Path $desk 'JHCIS (ตรวจอัปเดต).lnk'))
+    Assert-Equal $n2.TargetPath (Join-Path $inst 'JHCIS_Launcher.bat') 'shortcut bat target'
+    Assert-Equal $n2.WorkingDirectory $inst 'shortcut bat workdir'
+    Assert-True (Set-JhcisShortcuts "$inst\" -DesktopDirs @($desk) -PublicDesktop $desk) 'shortcuts idempotent with trailing backslash'
+    Assert-True (-not (Set-JhcisShortcuts (Join-Path $inst 'missing') -DesktopDirs @($desk) -PublicDesktop $desk)) 'shortcuts missing install -> false'
+    Remove-Item $inst, $desk -Recurse -Force
     Write-Host "$($Script:Failed) failed"
     exit ([int]($Script:Failed -ne 0))
 }
@@ -711,7 +775,7 @@ function New-Ctl([string]$Type, $Parent, [int]$X, [int]$Y, [int]$W, [int]$H, [st
     return $c
 }
 function Set-UiBusy([bool]$Busy) {
-    foreach ($c in @($Script:CboServer, $Script:BtnScan, $Script:TxtPort, $Script:TxtInstallPath, $Script:ChkInstall, $Script:ChkPerm, $Script:ChkUpdate, $Script:ChkGetdown, $Script:ChkJava, $Script:BtnStart)) { $c.Enabled = -not $Busy }
+    foreach ($c in @($Script:CboServer, $Script:BtnScan, $Script:TxtPort, $Script:TxtInstallPath, $Script:ChkInstall, $Script:ChkPerm, $Script:ChkUpdate, $Script:ChkGetdown, $Script:ChkJava, $Script:ChkShortcut, $Script:BtnStart)) { $c.Enabled = -not $Busy }
     $Script:ChkUninstall.Enabled = (-not $Busy) -and $Script:UninstallList.Count -gt 0
     if ($Busy) { $Script:Progress.Style = 'Marquee' }
     else { $Script:Progress.Style = 'Continuous'; $Script:Progress.Value = 0 }
@@ -818,6 +882,7 @@ function Invoke-InstallFlow {
     }
     if ($Script:ChkGetdown.Checked) { Invoke-Step 'วาง getdown.txt' { Set-GetdownFile $Script:TxtInstallPath.Text (Get-GetdownText) } }
     if ($Script:ChkJava.Checked) { Invoke-Step 'ปิด Java auto-update' { Disable-JavaUpdate } }
+    if ($Script:ChkShortcut.Checked) { Invoke-Step 'สร้าง shortcut JHCIS บน Desktop' { Set-JhcisShortcuts $Script:TxtInstallPath.Text } }
     if ($Script:StepFailures -eq 0) {
         Write-Log ok 'การติดตั้งเสร็จสิ้น'
         [void][Windows.Forms.MessageBox]::Show($Script:Form, "การติดตั้งเสร็จสิ้น`nเปิดโปรแกรม JHCIS จาก shortcut บน Desktop ได้เลย", 'JHCIS Installer', 'OK', 'Information')
@@ -830,7 +895,7 @@ function Invoke-InstallFlow {
 
 $Script:Form = New-Object Windows.Forms.Form
 $Script:Form.Text = "ติดตั้ง JHCIS Client v$($Script:Version)"
-$Script:Form.ClientSize = New-Object Drawing.Size(560, 680)
+$Script:Form.ClientSize = New-Object Drawing.Size(560, 730)
 $Script:Form.FormBorderStyle = 'FixedSingle'
 $Script:Form.MaximizeBox = $false
 $Script:Form.StartPosition = 'CenterScreen'
@@ -845,7 +910,7 @@ $Script:BtnScan = New-Ctl Button $grp 400 25 122 30 'สแกนใหม่'
 $Script:TxtPort = New-Ctl TextBox $grp 60 65 70 26 ([string]$Script:DefaultPort)
 $Script:LblOdbc = New-Ctl Label $grp 140 62 382 52 "ค่าที่ต้องกรอกตอน installer ถาม ODBC: user=root  password=$($Script:DefaultPassword)  database=jhcisdb"
 
-$grp = New-Ctl GroupBox $Script:Form 12 138 536 222 'ขั้นตอน'
+$grp = New-Ctl GroupBox $Script:Form 12 138 536 250 'ขั้นตอน'
 $Script:ChkUninstall = New-Ctl CheckBox $grp 14 26 510 28 'ถอน JHCIS Client / Java ตัวเดิม'
 $Script:ChkInstall = New-Ctl CheckBox $grp 14 58 510 28 'ติดตั้ง JHCIS Client'
 $Script:ChkPerm = New-Ctl CheckBox $grp 14 90 216 28 'ตั้ง permission โฟลเดอร์'
@@ -853,19 +918,24 @@ $Script:TxtInstallPath = New-Ctl TextBox $grp 232 90 290 26
 $Script:ChkUpdate = New-Ctl CheckBox $grp 14 122 510 28 'อัปเดต JHCIS เป็น version ใหม่ (JHCIS_Update.exe)'
 $Script:ChkGetdown = New-Ctl CheckBox $grp 14 154 510 28 'วาง getdown.txt (แก้ปัญหาเปิด JHCIS ไม่ได้)'
 $Script:ChkJava = New-Ctl CheckBox $grp 14 186 510 28 'ปิด Java auto-update (JHCIS ต้องใช้ JRE 1.8)'
-foreach ($c in @($Script:ChkUninstall, $Script:ChkInstall, $Script:ChkPerm, $Script:ChkUpdate, $Script:ChkGetdown, $Script:ChkJava)) { $c.Checked = $true }
+$Script:ChkShortcut = New-Ctl CheckBox $grp 14 214 510 28 'สร้าง shortcut JHCIS บน Desktop (ลบ shortcut เดิมก่อน)'
+foreach ($c in @($Script:ChkUninstall, $Script:ChkInstall, $Script:ChkPerm, $Script:ChkUpdate, $Script:ChkGetdown, $Script:ChkJava, $Script:ChkShortcut)) { $c.Checked = $true }
 $found = Find-InstallPath
 if ($found) { $Script:PrefillPath = $found }
 $Script:TxtInstallPath.Text = $Script:PrefillPath
 
-$Script:BtnStart = New-Ctl Button $Script:Form 12 370 406 40 '▶ เริ่มติดตั้ง'
-$Script:BtnClose = New-Ctl Button $Script:Form 428 370 120 40 'ปิด'
-$Script:Progress = New-Ctl ProgressBar $Script:Form 12 420 536 22
-$Script:LogBox = New-Ctl RichTextBox $Script:Form 12 452 536 216
+$Script:BtnStart = New-Ctl Button $Script:Form 12 398 406 40 '▶ เริ่มติดตั้ง'
+$Script:BtnClose = New-Ctl Button $Script:Form 428 398 120 40 'ปิด'
+$Script:Progress = New-Ctl ProgressBar $Script:Form 12 448 536 22
+$Script:LogBox = New-Ctl RichTextBox $Script:Form 12 480 536 216
 $Script:LogBox.ReadOnly = $true
 $Script:LogBox.ScrollBars = 'Vertical'
 $Script:LogBox.BackColor = [Drawing.Color]::White
 $Script:LogBox.Font = New-Object Drawing.Font('Segoe UI', 9)
+$Script:LblCredit = New-Ctl Label $Script:Form 12 700 536 22 $Script:Credit
+$Script:LblCredit.TextAlign = 'MiddleRight'
+$Script:LblCredit.ForeColor = [Drawing.Color]::Gray
+$Script:LblCredit.Font = New-Object Drawing.Font('Segoe UI', 8.5)
 
 $Script:Form.Add_Shown({
     try {
