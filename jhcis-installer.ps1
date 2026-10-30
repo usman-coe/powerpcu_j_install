@@ -351,6 +351,50 @@ function Find-MysqlServers([int]$Port, [scriptblock]$OnProgress = $null, [string
     }
     return @($results)
 }
+function Resolve-PayloadFile([string]$Name, [string]$Sha256, [long]$Size, [string]$Url, [string[]]$SearchDirs, [string]$DownloadDir, [scriptblock]$OnProgress = $null, [scriptblock]$ConfirmUseMismatch = $null) {
+    if (-not $ConfirmUseMismatch) {
+        $ConfirmUseMismatch = { param($path) [Windows.Forms.MessageBox]::Show(("ไฟล์ {0} มีอยู่แล้วแต่ไม่ตรงกับที่โปรแกรมรู้จัก ใช้ไฟล์นี้ต่อหรือไม่? (No = ดาวน์โหลดใหม่)" -f $path), 'JHCIS Installer', 'YesNo', 'Warning') -eq 'Yes' }
+    }
+    $asked = $false
+    foreach ($dir in $SearchDirs) {
+        $path = Join-Path $dir $Name
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { continue }
+        if (Test-FileSha256 $path $Sha256) { Write-Log ok "พบไฟล์ติดตั้ง: $path"; return $path }
+        if (-not $asked) {
+            $asked = $true
+            if (& $ConfirmUseMismatch $path) { Write-Log ok "พบไฟล์ติดตั้ง: $path"; return $path }
+        }
+    }
+    $part = Join-Path $DownloadDir "$Name.part"
+    $final = Join-Path $DownloadDir $Name
+    for ($attempt = 1; $attempt -le 2; $attempt++) {
+        Remove-Item -LiteralPath $part -Force -ErrorAction SilentlyContinue
+        Write-Log info "กำลังดาวน์โหลด $Name ($([math]::Round($Size/1MB)) MB) ..."
+        $wc = New-Object Net.WebClient
+        try {
+            $task = $wc.DownloadFileTaskAsync($Url, $part)
+            Wait-UiUntil { $task.IsCompleted } -OnTick {
+                if ($OnProgress) { $len = 0; if (Test-Path -LiteralPath $part) { $len = (Get-Item -LiteralPath $part).Length }; & $OnProgress $len $Size }
+            } | Out-Null
+            if ($task.IsFaulted -or $task.IsCanceled) {
+                $msg = if ($task.Exception -and $task.Exception.InnerException) { $task.Exception.InnerException.Message } else { 'ยกเลิก' }
+                Write-Log err "ดาวน์โหลดไม่สำเร็จ: $Name - $msg"
+                Remove-Item -LiteralPath $part -Force -ErrorAction SilentlyContinue
+                return $null
+            }
+        } finally { $wc.Dispose() }
+        if (Test-FileSha256 $part $Sha256) {
+            Move-Item -LiteralPath $part -Destination $final -Force
+            if ($OnProgress) { & $OnProgress $Size $Size }
+            Write-Log ok "ดาวน์โหลด $Name เสร็จแล้ว"
+            return $final
+        }
+        Remove-Item -LiteralPath $part -Force -ErrorAction SilentlyContinue
+        if ($attempt -lt 2) { Write-Log warn 'ไฟล์ที่โหลดมา SHA256 ไม่ตรง - ลองโหลดใหม่' }
+    }
+    Write-Log err 'ไฟล์ที่โหลดมาไม่ตรงกับที่โปรแกรมรู้จัก โปรแกรมเวอร์ชันนี้อาจเก่า กรุณาโหลดโปรแกรมเวอร์ชันใหม่'
+    return $null
+}
 $Script:WorkDir = Get-WritableDir $Script:BaseDir
 $Script:LogFile = Join-Path $Script:WorkDir 'jhcis-installer.log'
 #endregion
@@ -462,6 +506,24 @@ function Invoke-SelfTest {
     Assert-True ($Script:ProgressDone -ge 0 -and $Script:ProgressTotal -eq 2) 'scan progress callback called with total'
     try { $accept2.Result.Dispose() } catch {}; $listener2.Stop()
     if ($env:JHCIS_SCAN) { $sw=[Diagnostics.Stopwatch]::StartNew(); $r=@(Find-MysqlServers 3306); Write-Host "scan: $($r.Count) found in $($sw.ElapsedMilliseconds) ms: $($r | % { "$($_.Host) $($_.Version)" })" }
+    $src = Join-Path $env:TEMP ("payload-src-{0}.bin" -f [guid]::NewGuid())
+    $bytes = New-Object byte[] 1048576; (New-Object Random).NextBytes($bytes); [IO.File]::WriteAllBytes($src, $bytes)
+    $sha = (Get-FileHash $src -Algorithm SHA256).Hash
+    $url = ([Uri]$src).AbsoluteUri
+    $d1 = Join-Path $env:TEMP ("payload-d1-{0}" -f [guid]::NewGuid()); New-Item -ItemType Directory $d1 | Out-Null
+    $Script:TestProg = 0
+    $got = Resolve-PayloadFile -Name 'p.bin' -Sha256 $sha -Size $bytes.Length -Url $url -SearchDirs @($d1) -DownloadDir $d1 -OnProgress { param($a,$b) $Script:TestProg++ }
+    Assert-Equal $got (Join-Path $d1 'p.bin') 'payload downloaded to download dir'
+    Assert-True ($Script:TestProg -ge 1) 'payload progress callback called'
+    Assert-True (Test-FileSha256 $got $sha) 'payload downloaded sha ok'
+    Assert-True (-not (Test-Path "$got.part")) 'payload no .part left'
+    Assert-Equal (Resolve-PayloadFile -Name 'p.bin' -Sha256 $sha -Size $bytes.Length -Url 'file:///Z:/missing.bin' -SearchDirs @($d1) -DownloadDir $d1) $got 'payload found locally, no download'
+    $d2 = Join-Path $env:TEMP ("payload-d2-{0}" -f [guid]::NewGuid()); New-Item -ItemType Directory $d2 | Out-Null
+    Assert-Equal (Resolve-PayloadFile -Name 'p.bin' -Sha256 ('0'*64) -Size $bytes.Length -Url $url -SearchDirs @($d2) -DownloadDir $d2) $null 'payload bad sha -> null'
+    Assert-True (-not (Test-Path (Join-Path $d2 'p.bin')) -and -not (Test-Path (Join-Path $d2 'p.bin.part'))) 'payload bad sha leaves nothing'
+    Assert-Equal (Resolve-PayloadFile -Name 'p.bin' -Sha256 ('0'*64) -Size 1 -Url $url -SearchDirs @($d1) -DownloadDir $d1 -ConfirmUseMismatch { $true }) $got 'payload local mismatch, user accepts'
+    Assert-Equal (Resolve-PayloadFile -Name 'p.bin' -Sha256 $sha -Size 1 -Url 'file:///Z:/missing.bin' -SearchDirs @($d2) -DownloadDir $d2) $null 'payload download failure -> null'
+    Remove-Item $src, $d1, $d2 -Recurse -Force
     Write-Host "$($Script:Failed) failed"
     exit ([int]($Script:Failed -ne 0))
 }
