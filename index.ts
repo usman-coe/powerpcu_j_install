@@ -7,6 +7,7 @@ import {
 } from "./src/permissions";
 import { scanLan, type MysqlServer } from "./src/scanner";
 import { disableJavaUpdate } from "./src/java";
+import { findInstalled, uninstallApp } from "./src/uninstall";
 import { ensureUtf8Console } from "./src/console";
 import {
   alreadyRelaunchedInWt,
@@ -46,7 +47,7 @@ async function main(): Promise<number> {
   console.log(
     `\n${color.dim}โปรแกรมนี้จะ:${color.reset}\n` +
       `  1. ค้นหา MySQL server ของ JHCIS ในวงแลน (port ${DEFAULT_PORT})\n` +
-      `  2. ติดตั้ง JHCIS Client\n` +
+      `  2. ถอน JHCIS Client / Java ตัวเดิม (ถ้ามี) แล้วติดตั้ง JHCIS Client ใหม่\n` +
       `  3. อัปเดท permission ของโฟลเดอร์ที่ติดตั้ง\n` +
       `  4. (ถ้าต้องการ) อัปเดท version ใหม่ของ JHCIS\n` +
       `  5. วาง getdown.txt แก้ปัญหาเปิดโปรแกรมไม่ได้\n` +
@@ -57,6 +58,20 @@ async function main(): Promise<number> {
     warn("ยกเลิกโดยผู้ใช้");
     await pause();
     return 0;
+  }
+
+  const installed = findInstalled();
+  const isServerMachine = installed.some((a) => a.kind === "server");
+  if (isServerMachine) {
+    warn(
+      `เครื่องนี้มี ${color.bold}JHCIS Server${color.reset} ติดตั้งอยู่ - โปรแกรมนี้ใช้กับเครื่องลูกเท่านั้น ` +
+        "(จะไม่ถอน Java เพราะเครื่องแม่ต้องใช้)",
+    );
+    if (!(await confirm("ดำเนินการต่อจริงหรือไม่?", false))) {
+      warn("ยกเลิกโดยผู้ใช้");
+      await pause();
+      return 0;
+    }
   }
 
   // ── Step 1: Discover server ───────────────────────────────────────
@@ -101,6 +116,23 @@ async function main(): Promise<number> {
 
   // ── Step 2: Run client installer ──────────────────────────────────
   step(2, TOTAL_STEPS, "ติดตั้ง JHCIS Client");
+  // Client before Java, so the client uninstaller still has a JRE if it needs one.
+  const old = [
+    ...installed.filter((a) => a.kind === "client"),
+    ...(isServerMachine ? [] : installed.filter((a) => a.kind === "java")),
+  ];
+  if (old.length > 0) {
+    console.log(`\nพบโปรแกรมเดิมที่ติดตั้งอยู่:`);
+    old.forEach((a) => console.log(`  - ${a.name} ${color.gray}${a.version}${color.reset}`));
+    if (await confirm("ถอนการติดตั้งของเดิมทั้งหมดก่อนติดตั้งใหม่?", true)) {
+      for (const a of old) await uninstallApp(a);
+    } else {
+      info("ไม่ถอนของเดิม - ติดตั้งทับ");
+    }
+  } else {
+    ok("ไม่พบ JHCIS Client / Java ตัวเดิม");
+  }
+
   if (await confirm("รันตัวติดตั้ง JHCIS Client เลยหรือไม่?", true)) {
     const r = await runClientInstaller();
     if (!r.ok) {
