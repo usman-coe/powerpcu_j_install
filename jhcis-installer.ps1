@@ -516,6 +516,7 @@ function Disable-JavaUpdate {
 function Set-JhcisShortcuts([string]$InstallPath, [string[]]$DesktopDirs = $null, [string]$PublicDesktop = $null) {
     try {
         $InstallPath = $InstallPath.Trim().TrimEnd('\')
+        if ($InstallPath -match '^[A-Za-z]:$') { Write-Log err "ปฏิเสธ: โฟลเดอร์ติดตั้งเป็น root ของไดรฟ์ ($InstallPath)"; return $false }
         $jar = Join-Path $InstallPath 'JHCIS_Launcher.jar'
         $bat = Join-Path $InstallPath 'JHCIS_Launcher.bat'
         if (-not (Test-Path -LiteralPath $jar -PathType Leaf) -or -not (Test-Path -LiteralPath $bat -PathType Leaf)) {
@@ -524,8 +525,12 @@ function Set-JhcisShortcuts([string]$InstallPath, [string[]]$DesktopDirs = $null
         }
         if (-not $PublicDesktop) { $PublicDesktop = Join-Path $env:PUBLIC 'Desktop' }
         if (-not $DesktopDirs) {
-            $DesktopDirs = @($PublicDesktop) + @(Get-ChildItem -LiteralPath (Split-Path $env:PUBLIC) -Directory -ErrorAction SilentlyContinue |
-                ForEach-Object { Join-Path $_.FullName 'Desktop' } | Where-Object { Test-Path -LiteralPath $_ -PathType Container }) | Select-Object -Unique
+            $DesktopDirs = @(@($PublicDesktop, [Environment]::GetFolderPath('Desktop'), [Environment]::GetFolderPath('CommonDesktopDirectory')) +
+                @(Get-ChildItem -LiteralPath (Split-Path $env:PUBLIC) -Directory -ErrorAction SilentlyContinue | ForEach-Object {
+                    Join-Path $_.FullName 'Desktop'
+                    Get-ChildItem -LiteralPath $_.FullName -Directory -Filter 'OneDrive*' -ErrorAction SilentlyContinue | ForEach-Object {
+                        Get-ChildItem -LiteralPath $_.FullName -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '^(Desktop|เดสก์ท็อป)$' } | ForEach-Object FullName }
+                }) | Where-Object { $_ -and (Test-Path -LiteralPath $_ -PathType Container) } | Group-Object { $_.ToLowerInvariant() } | ForEach-Object { $_.Group[0] })
         }
         $sh = New-Object -ComObject WScript.Shell
         foreach ($dir in $DesktopDirs) {
@@ -725,9 +730,11 @@ function Invoke-SelfTest {
     $wsh = New-Object -ComObject WScript.Shell
     $old = $wsh.CreateShortcut((Join-Path $desk 'JHCIS-Client.lnk')); $old.TargetPath = (Join-Path $inst 'jhcis.jar'); $old.Save()
     $oth = $wsh.CreateShortcut((Join-Path $desk 'Notepad.lnk')); $oth.TargetPath = (Join-Path $env:SystemRoot 'notepad.exe'); $oth.Save()
+    $sib = $wsh.CreateShortcut((Join-Path $desk 'Sibling.lnk')); $sib.TargetPath = "$inst-old\x.jar"; $sib.Save()
     Assert-True (Set-JhcisShortcuts $inst -DesktopDirs @($desk) -PublicDesktop $desk) 'shortcuts created'
     Assert-True (-not (Test-Path (Join-Path $desk 'JHCIS-Client.lnk'))) 'old jhcis shortcut removed'
     Assert-True (Test-Path (Join-Path $desk 'Notepad.lnk')) 'unrelated shortcut kept'
+    Assert-True (Test-Path (Join-Path $desk 'Sibling.lnk')) 'sibling-prefix shortcut kept'
     $n1 = $wsh.CreateShortcut((Join-Path $desk 'JHCIS.lnk'))
     Assert-Equal $n1.TargetPath (Join-Path $inst 'JHCIS_Launcher.jar') 'shortcut jar target'
     Assert-Equal $n1.WorkingDirectory $inst 'shortcut jar workdir'
@@ -736,7 +743,13 @@ function Invoke-SelfTest {
     Assert-Equal $n2.TargetPath (Join-Path $inst 'JHCIS_Launcher.bat') 'shortcut bat target'
     Assert-Equal $n2.WorkingDirectory $inst 'shortcut bat workdir'
     Assert-True (Set-JhcisShortcuts "$inst\" -DesktopDirs @($desk) -PublicDesktop $desk) 'shortcuts idempotent with trailing backslash'
+    Assert-Equal ($wsh.CreateShortcut((Join-Path $desk 'JHCIS.lnk')).TargetPath) (Join-Path $inst 'JHCIS_Launcher.jar') 'shortcut jar target after rerun'
+    Assert-True (Test-Path -LiteralPath (Join-Path $desk 'JHCIS (ตรวจอัปเดต).lnk')) 'shortcut bat exists after rerun'
     Assert-True (-not (Set-JhcisShortcuts (Join-Path $inst 'missing') -DesktopDirs @($desk) -PublicDesktop $desk)) 'shortcuts missing install -> false'
+    $cnt = @(Get-ChildItem -LiteralPath $desk).Count
+    & { function Test-Path { $true }   # stub: launcher files "exist" at C:\ so only the root guard stops it; a broken guard deletes Notepad.lnk from $desk (temp only)
+        Assert-True (-not (Set-JhcisShortcuts 'C:\' -DesktopDirs @($desk) -PublicDesktop $desk)) 'shortcuts drive root refused' }
+    Assert-True ((Test-Path (Join-Path $desk 'Notepad.lnk')) -and @(Get-ChildItem -LiteralPath $desk).Count -eq $cnt) 'drive root left desk untouched (Notepad kept, nothing created)'
     Remove-Item $inst, $desk -Recurse -Force
     Write-Host "$($Script:Failed) failed"
     exit ([int]($Script:Failed -ne 0))

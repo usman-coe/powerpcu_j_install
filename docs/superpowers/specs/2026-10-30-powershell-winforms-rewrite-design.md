@@ -187,8 +187,13 @@ Release ของโปรแกรมใช้ tag `vX.Y.Z` มี asset `jhcis
   - ลบค่า `SunJavaUpdateSched` ใน `<root>\Microsoft\Windows\CurrentVersion\Run` (ไม่มีก็ไม่เป็นไร)
 
 ### 6.9 สร้าง shortcut บน Desktop
-- ใช้ path จากช่อง path ติดตั้ง (ตัวเดียวกับ 6.5 / 6.7) ตัดช่องว่างและ `\` ท้ายออก ต้องมีทั้ง `JHCIS_Launcher.jar` และ `JHCIS_Launcher.bat` ในโฟลเดอร์นั้น ถ้าไม่มีโฟลเดอร์หรือขาดไฟล์ใดไฟล์หนึ่ง → log ✗ "ไม่พบ JHCIS_Launcher.jar / JHCIS_Launcher.bat ใน <path> - ข้ามการสร้าง shortcut" (นับเป็นขั้นตอนล้มเหลว)
-- ลบ shortcut เดิม: เฉพาะไฟล์ `*.lnk` บน Desktop ของทุก user คือ `%PUBLIC%\Desktop` และ `<โฟลเดอร์ user>\Desktop` ของทุกโฟลเดอร์ใต้ `C:\Users` ที่มีโฟลเดอร์ Desktop อยู่จริง และลบเฉพาะตัวที่ target เป็นโฟลเดอร์ติดตั้งเองหรือไฟล์ที่อยู่ข้างในโฟลเดอร์นั้น (เทียบแบบไม่สนตัวพิมพ์) shortcut อื่นไม่แตะ ไม่แตะ Start Menu / Startup ตัวไหนอ่านหรือลบไม่ได้ → log ! แล้วทำตัวถัดไป
+- ใช้ path จากช่อง path ติดตั้ง (ตัวเดียวกับ 6.5 / 6.7) ตัดช่องว่างและ `\` ท้ายออก ถ้าเป็น root ของไดรฟ์ (เช่น `C:\`) → log ✗ "ปฏิเสธ: โฟลเดอร์ติดตั้งเป็น root ของไดรฟ์ (C:)" ไม่ลบ/ไม่สร้างอะไร ต้องมีทั้ง `JHCIS_Launcher.jar` และ `JHCIS_Launcher.bat` ในโฟลเดอร์นั้น ถ้าไม่มีโฟลเดอร์หรือขาดไฟล์ใดไฟล์หนึ่ง → log ✗ "ไม่พบ JHCIS_Launcher.jar / JHCIS_Launcher.bat ใน <path> - ข้ามการสร้าง shortcut" (นับเป็นขั้นตอนล้มเหลว)
+- ลบ shortcut เดิม: เฉพาะไฟล์ `*.lnk` (ไม่ลงโฟลเดอร์ย่อย) ในโฟลเดอร์ Desktop ต่อไปนี้ที่มีอยู่จริง (ตัดตัวซ้ำแบบไม่สนตัวพิมพ์)
+  - Public Desktop: `%PUBLIC%\Desktop` และ shell folder `CommonDesktopDirectory`
+  - `C:\Users\*\Desktop` ทุกโฟลเดอร์ user
+  - Desktop ที่ย้ายไป OneDrive: `C:\Users\*\OneDrive*\Desktop` หรือ `C:\Users\*\OneDrive*\เดสก์ท็อป` (Windows ภาษาไทย)
+  - Desktop ของ user ที่รันโปรแกรม ตาม shell folder (`[Environment]::GetFolderPath('Desktop')`)
+- ลบเฉพาะตัวที่ target เป็นโฟลเดอร์ติดตั้งเองหรือไฟล์ที่อยู่ข้างในโฟลเดอร์นั้น (เทียบแบบไม่สนตัวพิมพ์) shortcut อื่นไม่แตะ ไม่แตะ Start Menu / Startup ตัวไหนอ่านหรือลบไม่ได้ → log ! แล้วทำตัวถัดไป
 - สร้างใหม่ 2 ตัวที่ `%PUBLIC%\Desktop` (เห็นทุก user, สร้างโฟลเดอร์ให้ถ้าไม่มี)
 
 | ไฟล์ | Target | Description |
