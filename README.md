@@ -19,13 +19,14 @@
 
 1. โหลด `jhcis-installer.exe` จาก release `vX.Y.Z` ล่าสุด
 2. คัดลอกใส่ flash drive แล้วนำไปที่เครื่องปลายทาง
-3. ดับเบิลคลิก แล้วกด Yes ที่ UAC
+3. ดับเบิลคลิก แล้วกด Yes ที่ UAC (ถ้า Windows SmartScreen เตือนครั้งแรก ให้กด "ข้อมูลเพิ่มเติม" → "เรียกใช้ต่อไป")
 4. ครั้งแรกโปรแกรมจะดาวน์โหลดไฟล์ติดตั้ง ~450 MB เก็บไว้ข้าง exe และตรวจ SHA256 ครั้งต่อไปใช้ไฟล์เดิม
+   - ไม่มีอินเทอร์เน็ตที่เครื่องปลายทาง: โหลด 2 ไฟล์จาก https://github.com/usman-coe/powerpcu_j_install/releases/tag/payload-2026-10 ไว้ก่อน แล้ววางไว้โฟลเดอร์เดียวกับ exe
 5. ถ้า antivirus ไม่ให้รัน exe ให้ใช้ `run.cmd` + `jhcis-installer.ps1` แทน (วางไว้โฟลเดอร์เดียวกัน)
 
 ค่า ODBC ที่โปรแกรมถาม: IP จากผลการสแกน, Port `3333`, user `root`, password `123456`, database `jhcisdb`
 
-Log อยู่ที่ `jhcis-installer.log` ข้าง exe
+Log อยู่ที่ `jhcis-installer.log` ข้าง exe (ถ้าโฟลเดอร์ของ exe เขียนไม่ได้ เช่นรันจากแผ่น CD หรือแชร์แบบอ่านอย่างเดียว log และไฟล์ที่ดาวน์โหลดจะไปอยู่ที่ `%TEMP%` แทน)
 
 ## Build
 
@@ -38,7 +39,7 @@ powershell -ExecutionPolicy Bypass -File .\build.ps1
 ## ทดสอบ
 
 ```powershell
-.\jhcis-installer.ps1 -SelfTest    # รัน assert ในตัว แล้วออก (พิมพ์ "N failed")
+powershell -NoProfile -ExecutionPolicy Bypass -File .\jhcis-installer.ps1 -SelfTest   # รัน assert ในตัว แล้วออก (พิมพ์ "N failed") ต้องสั่งแบบนี้เพราะ policy ปกติของ Windows (Restricted) ไม่ให้รัน .ps1 ตรงๆ
 .\jhcis-installer.ps1 -NoElevate   # เปิดหน้าต่างโดยไม่ขอ UAC (สำหรับเครื่อง dev)
 ```
 

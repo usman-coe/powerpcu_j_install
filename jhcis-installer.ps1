@@ -2,6 +2,7 @@
 param([switch]$SelfTest, [switch]$NoElevate)
 Set-StrictMode -Version 2
 $ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'   # ps2exe turns Write-Progress into a popup window
 Add-Type -AssemblyName System.Windows.Forms, System.Drawing
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
@@ -19,6 +20,7 @@ $Script:DefaultInstallPath = 'C:\Program Files\jhcis-client'
 $Script:InstallPathCandidates = @('C:\Program Files\jhcis-client','C:\Program Files (x86)\jhcis-client','C:\JHCIS','C:\jhcis','C:\JHCIS-Client','C:\Program Files\JHCIS','C:\Program Files (x86)\JHCIS')
 $Script:GetdownUrl = 'https://jhcis.moph.go.th/files/getdown.txt'
 $Script:LogBox = $null
+$Script:Form = $null
 $Script:ActiveWebClient = $null
 $Script:GetdownFallback = @'
 # JHCIS Update Configuration
@@ -372,18 +374,26 @@ function Find-MysqlServers([int]$Port, [scriptblock]$OnProgress = $null, [string
     }
     return @($results)
 }
-function Resolve-PayloadFile([string]$Name, [string]$Sha256, [long]$Size, [string]$Url, [string[]]$SearchDirs, [string]$DownloadDir, [scriptblock]$OnProgress = $null, [scriptblock]$ConfirmUseMismatch = $null) {
+function Resolve-PayloadFile([string]$Name, [string]$Sha256, [long]$Size, [string]$Url, [string[]]$SearchDirs, [string]$DownloadDir, [scriptblock]$OnProgress = $null, [scriptblock]$ConfirmUseMismatch = $null, [int]$StallTimeoutMs = 60000) {
     if (-not $ConfirmUseMismatch) {
-        $ConfirmUseMismatch = { param($path) [Windows.Forms.MessageBox]::Show(("ไฟล์ {0} มีอยู่แล้วแต่ไม่ตรงกับที่โปรแกรมรู้จัก ใช้ไฟล์นี้ต่อหรือไม่? (No = ดาวน์โหลดใหม่)" -f $path), 'JHCIS Installer', 'YesNo', 'Warning') -eq 'Yes' }
+        $ConfirmUseMismatch = {
+            param($path)
+            $t = "ไฟล์ {0} มีอยู่แล้วแต่ไม่ตรงกับที่โปรแกรมรู้จัก`n`nใช้ไฟล์นี้ต่อหรือไม่?`nใช่ = ใช้ไฟล์นี้ (ไม่แนะนำ)   ไม่ใช่ = ดาวน์โหลดใหม่" -f $path
+            if ($null -ne $Script:Form -and -not $Script:Form.IsDisposed) { $r = [Windows.Forms.MessageBox]::Show($Script:Form, $t, 'JHCIS Installer', 'YesNo', 'Warning', 'Button2') }
+            else { $r = [Windows.Forms.MessageBox]::Show($t, 'JHCIS Installer', 'YesNo', 'Warning', 'Button2') }
+            $r -eq 'Yes'
+        }
     }
     $asked = $false
     foreach ($dir in $SearchDirs) {
         $path = Join-Path $dir $Name
         if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { continue }
+        Write-Log info "กำลังตรวจสอบไฟล์ $Name ..."
         if (Test-FileSha256 $path $Sha256) { Write-Log ok "พบไฟล์ติดตั้ง: $path"; return $path }
         if (-not $asked) {
             $asked = $true
-            if (& $ConfirmUseMismatch $path) { Write-Log ok "พบไฟล์ติดตั้ง: $path"; return $path }
+            Write-Log warn "ไฟล์ $path มีอยู่แล้วแต่ SHA256 ไม่ตรงกับที่โปรแกรมรู้จัก"
+            if (& $ConfirmUseMismatch $path) { Write-Log warn "ใช้ไฟล์ที่ไม่ผ่านการตรวจสอบตามที่ผู้ใช้ยืนยัน: $path"; return $path }
         }
     }
     $part = Join-Path $DownloadDir "$Name.part"
@@ -393,11 +403,21 @@ function Resolve-PayloadFile([string]$Name, [string]$Sha256, [long]$Size, [strin
         Write-Log info "กำลังดาวน์โหลด $Name ($([math]::Round($Size/1MB)) MB) ..."
         $wc = New-Object Net.WebClient
         $Script:ActiveWebClient = $wc
+        $st = @{ Len = [long]-1; Sw = [Diagnostics.Stopwatch]::StartNew(); Stalled = $false }   # stall watchdog: .part size must keep growing
         try {
             $task = $wc.DownloadFileTaskAsync($Url, $part)
-            Wait-UiUntil { $task.IsCompleted } -OnTick {
-                if ($OnProgress) { $len = 0; if (Test-Path -LiteralPath $part) { $len = (Get-Item -LiteralPath $part).Length }; & $OnProgress $len $Size }
+            Wait-UiUntil { $task.IsCompleted -or $st.Stalled } -OnTick {
+                $len = 0; if (Test-Path -LiteralPath $part) { $len = (Get-Item -LiteralPath $part).Length }
+                if ($len -ne $st.Len) { $st.Len = $len; $st.Sw.Restart() }
+                elseif (-not $task.IsCompleted -and $st.Sw.ElapsedMilliseconds -ge $StallTimeoutMs) { $st.Stalled = $true; try { $wc.CancelAsync() } catch { } }
+                if ($OnProgress) { & $OnProgress $len $Size }
             } | Out-Null
+            if ($st.Stalled) {
+                Wait-UiUntil { $task.IsCompleted } 5000 | Out-Null   # let WebClient close the .part stream
+                Write-Log err "ดาวน์โหลด $Name หยุดนิ่งนานเกินไป - ยกเลิก"
+                Remove-Item -LiteralPath $part -Force -ErrorAction SilentlyContinue
+                return $null
+            }
             if ($task.IsFaulted -or $task.IsCanceled) {
                 $msg = if ($task.Exception -and $task.Exception.InnerException) { $task.Exception.InnerException.Message } else { 'ยกเลิก' }
                 Write-Log err "ดาวน์โหลดไม่สำเร็จ: $Name - $msg"
@@ -405,6 +425,7 @@ function Resolve-PayloadFile([string]$Name, [string]$Sha256, [long]$Size, [strin
                 return $null
             }
         } finally { $wc.Dispose(); $Script:ActiveWebClient = $null }
+        Write-Log info "กำลังตรวจสอบไฟล์ $Name ..."
         if (Test-FileSha256 $part $Sha256) {
             Move-Item -LiteralPath $part -Destination $final -Force
             if ($OnProgress) { [void](& $OnProgress $Size $Size) }
@@ -424,7 +445,7 @@ function Uninstall-App([pscustomobject]$App) {
     $cmd = Get-SilentUninstallCommand $App.Uninstall
     if ($null -eq $cmd) { Write-Log err "ไม่รู้วิธีถอน $($App.Name) - กรุณาถอนเองใน Control Panel"; return $false }
     Write-Log info "กำลังถอนการติดตั้ง $($App.Name) ..."
-    $code = Invoke-Child $cmd.FilePath $cmd.Arguments -Hidden
+    $code = Invoke-Child $cmd.FilePath $cmd.Arguments   # not hidden: an NSIS prompt without /SD must stay clickable
     if ($code -eq 3010) { Write-Log ok "ถอน $($App.Name) แล้ว (ควร restart เครื่องภายหลัง)"; return $true }
     if ($code -in 0, 1605) { Write-Log ok "ถอน $($App.Name) แล้ว"; return $true }
     Write-Log err "ถอน $($App.Name) ไม่สำเร็จ (exit $code)"
@@ -432,25 +453,34 @@ function Uninstall-App([pscustomobject]$App) {
 }
 
 function Grant-FullPermissions([string]$Path) {
-    $Path = $Path.TrimEnd('\')
+    $Path = $Path.Trim().TrimEnd('\', '/')
+    $system = @($env:SystemRoot, $env:ProgramFiles, ${env:ProgramFiles(x86)}, $env:ProgramData, "$env:SystemDrive\Users", $env:USERPROFILE) | Where-Object { $_ } | ForEach-Object { $_.TrimEnd('\') }
+    if ($Path -match '^[A-Za-z]:$' -or $system -contains $Path) { Write-Log err "ปฏิเสธ: ไม่ตั้ง permission บนโฟลเดอร์ระบบ $Path"; return $false }
     if (-not (Test-Path -LiteralPath $Path -PathType Container)) { Write-Log err "ไม่พบโฟลเดอร์: $Path"; return $false }
-    Write-Log info "อัปเดท permission สำหรับ $Path"
+    Write-Log info "อัปเดต permission สำหรับ $Path"
     $icArgs = "`"$Path`" /T /C /Q /grant *S-1-5-32-545:(OI)(CI)F /grant *S-1-5-32-544:(OI)(CI)F"
     if ($env:USERNAME) { $icArgs += " /grant `"$env:USERNAME`":(OI)(CI)F" }
     $code = Invoke-Child 'icacls.exe' $icArgs -Hidden
-    if ($code -eq 0) { Write-Log ok "อัปเดท permission สำเร็จ - Users / Administrators / $env:USERNAME ได้ Full Control"; return $true }
-    Write-Log err "ไม่สามารถอัปเดท permission ได้ (exit code = $code)"
+    if ($code -eq 0) { Write-Log ok "อัปเดต permission สำเร็จ - Users / Administrators / $env:USERNAME ได้ Full Control"; return $true }
+    Write-Log err "ไม่สามารถอัปเดต permission ได้ (exit code = $code)"
     return $false
 }
 
 function Get-GetdownText([string]$Url = $Script:GetdownUrl, [int]$TimeoutMs = 10000) {
+    $wc = New-Object Net.WebClient
     try {
-        $resp = Invoke-WebRequest -Uri $Url -UseBasicParsing -TimeoutSec ([math]::Ceiling($TimeoutMs / 1000))
-        if (Test-GetdownContent $resp.Content) { Write-Log ok 'ดาวน์โหลด getdown.txt ล่าสุดจากเว็บกรมฯ แล้ว'; return $resp.Content }
-        Write-Log warn 'ไฟล์ getdown.txt จากเว็บไม่ถูกต้อง - ใช้ไฟล์ที่แนบมากับโปรแกรมแทน'
-    } catch {
-        Write-Log warn 'ดาวน์โหลด getdown.txt ไม่ได้ (ไม่มีอินเทอร์เน็ต?) - ใช้ไฟล์ที่แนบมากับโปรแกรมแทน'
-    }
+        $wc.Encoding = [Text.Encoding]::UTF8
+        $task = $wc.DownloadStringTaskAsync($Url)
+        if (-not (Wait-UiUntil { $task.IsCompleted } $TimeoutMs)) { try { $wc.CancelAsync() } catch { } }
+        elseif (-not $task.IsFaulted -and -not $task.IsCanceled) {
+            $text = $task.Result
+            if (Test-GetdownContent $text) { Write-Log ok 'ดาวน์โหลด getdown.txt ล่าสุดจากเว็บกรมฯ แล้ว'; return $text }
+            Write-Log warn 'ไฟล์ getdown.txt จากเว็บไม่ถูกต้อง - ใช้ไฟล์ที่แนบมากับโปรแกรมแทน'
+            return $Script:GetdownFallback
+        }
+    } catch { }
+    finally { $wc.Dispose() }
+    Write-Log warn 'ดาวน์โหลด getdown.txt ไม่ได้ (ไม่มีอินเทอร์เน็ต?) - ใช้ไฟล์ที่แนบมากับโปรแกรมแทน'
     return $Script:GetdownFallback
 }
 
@@ -623,12 +653,27 @@ function Invoke-SelfTest {
     Assert-Equal ((Get-Content (Join-Path $gd 'getdown.txt') -Encoding Byte -TotalCount 3) -join ',') '97,112,112' 'getdown no BOM'
     Assert-True (-not (Set-GetdownFile (Join-Path $gd 'missing') 'x')) 'getdown missing dir -> false'
     Assert-Equal (Get-GetdownText 'http://127.0.0.1:9/getdown.txt' 1000) $Script:GetdownFallback 'getdown unreachable -> fallback'
+    $gt = Join-Path $gd 'web.txt'; $gurl = ([Uri]$gt).AbsoluteUri; $gtext = "appbase = https://example/`n# ทดสอบ`n"
+    [IO.File]::WriteAllText($gt, $gtext, (New-Object Text.UTF8Encoding $false))
+    Assert-True ([string]::Equals((Get-GetdownText $gurl 3000), $gtext, [StringComparison]::Ordinal)) 'getdown web text decoded as UTF-8'
+    [IO.File]::WriteAllText($gt, '<html><body>404</body></html>')
+    Assert-Equal (Get-GetdownText $gurl 3000) $Script:GetdownFallback 'getdown html 200 -> fallback'
     Assert-True (Grant-FullPermissions $gd) 'icacls on temp dir'
     Assert-True (Grant-FullPermissions "$gd\") 'icacls trailing backslash'
     Assert-True (-not (Grant-FullPermissions (Join-Path $gd 'missing'))) 'icacls missing -> false'
+    & { function Invoke-Child { 0 }   # stub: a broken guard must fail these asserts, not run icacls on the real C:\
+        foreach ($bad in 'C:\', 'C:', $env:SystemRoot, $env:ProgramFiles, "$env:SystemDrive\Users") { Assert-True (-not (Grant-FullPermissions $bad)) "icacls refuses $bad" } }
     Assert-True (-not (Uninstall-App ([pscustomobject]@{Name='X';Version='';Uninstall='rundll32 foo';Kind='client'}))) 'uninstall unknown -> false'
     Remove-Item $gd -Recurse -Force
     if ($env:JHCIS_JAVA) { Assert-True (Disable-JavaUpdate) 'disable java update (admin)' }
+    $sl = New-Object Net.Sockets.TcpListener ([Net.IPAddress]::Loopback, 0); $sl.Start()   # accepts connections, never answers
+    $surl = "http://127.0.0.1:$($sl.LocalEndpoint.Port)"
+    $sw = [Diagnostics.Stopwatch]::StartNew(); $r = Get-GetdownText "$surl/g" 1500; $ms = $sw.ElapsedMilliseconds
+    Assert-True ($r -eq $Script:GetdownFallback -and $ms -lt 4000) "getdown stalled server -> fallback ($ms ms)"
+    $sd = Join-Path $env:TEMP ("payload-stall-{0}" -f [guid]::NewGuid()); New-Item -ItemType Directory $sd | Out-Null
+    $sw.Restart(); $r = Resolve-PayloadFile -Name 'stall.bin' -Sha256 ('0'*64) -Size 10 -Url "$surl/s" -SearchDirs @() -DownloadDir $sd -StallTimeoutMs 1500; $ms = $sw.ElapsedMilliseconds
+    Assert-True ($null -eq $r -and $ms -lt 4000 -and -not (Test-Path (Join-Path $sd 'stall.bin.part'))) "payload stall watchdog -> null, no .part ($ms ms)"
+    $sl.Stop(); Remove-Item $sd -Recurse -Force
     Write-Host "$($Script:Failed) failed"
     exit ([int]($Script:Failed -ne 0))
 }
@@ -638,7 +683,7 @@ if ($SelfTest) { Invoke-SelfTest }
 #region Elevation
 $Script:IsAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 if (-not $Script:IsAdmin -and $PSCommandPath -and -not $NoElevate) {
-    try { Start-Process powershell -Verb RunAs -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`" -NoElevate" }
+    try { Start-Process powershell -Verb RunAs -WindowStyle Hidden -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`" -NoElevate" }
     catch { Write-Log err "ขอสิทธิ์ Administrator ไม่สำเร็จ: $($_.Exception.Message)" }
     exit
 }
@@ -654,6 +699,8 @@ $Script:DlName = ''
 $Script:LastPct = -1
 $Script:StepFailures = 0
 $Script:PrefillPath = $Script:DefaultInstallPath
+$Script:Scanning = $false
+$Script:StartQueued = $false
 
 function New-Ctl([string]$Type, $Parent, [int]$X, [int]$Y, [int]$W, [int]$H, [string]$Text = '') {
     $c = New-Object "Windows.Forms.$Type"
@@ -670,8 +717,9 @@ function Set-UiBusy([bool]$Busy) {
     else { $Script:Progress.Style = 'Continuous'; $Script:Progress.Value = 0 }
 }
 function Start-Scan {
+    $Script:Scanning = $true
     Set-UiBusy $true
-    $Script:BtnStart.Enabled = $true   # spec 5: กดเริ่มติดตั้งได้โดยไม่ต้องรอสแกนเสร็จ
+    $Script:BtnStart.Enabled = $true   # spec 5: กดเริ่มติดตั้งระหว่างสแกนได้ (เข้าคิว เริ่มเองเมื่อสแกนเสร็จ)
     try {
         $found = @(Find-MysqlServers (ConvertTo-Port $Script:TxtPort.Text) -OnProgress {
             param($done, $total, $cnt)
@@ -685,7 +733,14 @@ function Start-Scan {
         foreach ($s in $found) { [void]$Script:CboServer.Items.Add("$($s.Host) ($($s.Version))") }
         if ($found.Count -gt 0) { $Script:CboServer.SelectedIndex = 0 }
         else { Write-Log warn 'ไม่พบ MySQL server ในวงแลน - พิมพ์ IP เครื่องแม่เองในช่อง IP' }
-    } finally { Set-UiBusy $false }
+    } finally {
+        Set-UiBusy $false
+        $Script:Scanning = $false
+        if ($Script:StartQueued) {
+            $Script:StartQueued = $false
+            if (-not $Script:Form.IsDisposed) { $Script:BtnStart.PerformClick() }   # window closed during the scan -> never start headless
+        }
+    }
 }
 $Script:OnDownload = {
     param($done, $total)
@@ -720,19 +775,30 @@ function Invoke-InstallFlow {
     $Script:StepFailures = 0
     $Script:TxtInstallPath.Text = $Script:TxtInstallPath.Text.Trim()
     if (-not $Script:TxtInstallPath.Text) { $Script:TxtInstallPath.Text = $Script:DefaultInstallPath }
+    # spec 6: หาไฟล์ติดตั้ง Client ให้ได้ก่อนถอนของเดิม ไม่งั้นถ้าโหลดไม่ได้ เครื่องจะไม่เหลือทั้ง Client และ Java
+    $clientFile = $null
+    if ($Script:ChkInstall.Checked) {
+        try { $clientFile = Get-Payload $Script:Payload.Client @(@($Script:BaseDir, (Join-Path $Script:BaseDir 'JHCIS-install-jre_jdk_64\jHCIS-All-PCU'), $Script:WorkDir) | Select-Object -Unique) }
+        catch { Write-Log err "หาไฟล์ติดตั้ง JHCIS Client ไม่สำเร็จ: $($_.Exception.Message)" }
+    }
     if ($Script:ChkUninstall.Checked) {
-        foreach ($a in $Script:UninstallList) { Invoke-Step "ถอน $($a.Name)" { Uninstall-App $a } }
+        if ($Script:ChkInstall.Checked -and -not $clientFile) { Write-Log err 'ไม่ถอนของเดิมเพราะยังไม่มีไฟล์ติดตั้ง JHCIS Client' }
+        else { foreach ($a in $Script:UninstallList) { Invoke-Step "ถอน $($a.Name)" { Uninstall-App $a } } }
     }
     if ($Script:ChkInstall.Checked) {
         Invoke-Step 'ติดตั้ง JHCIS Client' {
-            $file = Get-Payload $Script:Payload.Client @($Script:BaseDir, (Join-Path $Script:BaseDir 'JHCIS-install-jre_jdk_64\jHCIS-All-PCU'))
-            if (-not $file) { return $false }
+            if (-not $clientFile) { return $false }
             $ip = Get-IpFromServerText $Script:CboServer.Text
             if (-not $ip) { Write-Log warn 'ไม่ได้ระบุ IP เครื่องแม่ - ต้องกรอกค่า ODBC เองตอน installer ถาม'; $ip = '(ไม่พบ - กรอกเอง)' }
-            [void][Windows.Forms.MessageBox]::Show("เมื่อ installer ถามค่า ODBC ให้กรอก:`nIP = $ip`nPort = $(ConvertTo-Port $Script:TxtPort.Text)`nuser = root`npassword = $($Script:DefaultPassword)`ndatabase = jhcisdb", 'JHCIS Installer', 'OK', 'Information')
+            if ($Script:Form.WindowState -eq 'Minimized') { $Script:Form.WindowState = 'Normal' }
+            $Script:Form.Activate()
+            [void][Windows.Forms.MessageBox]::Show($Script:Form, "เมื่อ installer ถามค่า ODBC ให้กรอก:`nIP = $ip`nPort = $(ConvertTo-Port $Script:TxtPort.Text)`nuser = root`npassword = $($Script:DefaultPassword)`ndatabase = jhcisdb", 'JHCIS Installer', 'OK', 'Information')
             $Script:Progress.Style = 'Marquee'
             Write-Log info 'กำลังรันตัวติดตั้ง JHCIS Client ...'
-            if ((Invoke-Child $file) -ne 0) { Write-Log warn 'ตัวติดตั้งจบโดยไม่สำเร็จ - ดำเนินการต่อ (อาจเป็นเพราะปิด installer ก่อนติดตั้งเสร็จ)' }
+            if ((Invoke-Child $clientFile -WorkingDirectory (Split-Path $clientFile)) -ne 0) {
+                Write-Log warn 'ตัวติดตั้งจบโดยไม่สำเร็จ - ดำเนินการต่อ (อาจเป็นเพราะปิด installer ก่อนติดตั้งเสร็จ)'
+                $false   # counts as a failed step; still re-detect the install folder below
+            }
             else { Write-Log ok 'ตัวติดตั้ง JHCIS Client ทำงานเสร็จแล้ว' }
             $found = Find-InstallPath
             if ($found -and $Script:TxtInstallPath.Text.Trim() -eq $Script:PrefillPath) { $Script:TxtInstallPath.Text = $found; Write-Log info "ตรวจพบโฟลเดอร์ติดตั้งใหม่: $found" }
@@ -741,11 +807,11 @@ function Invoke-InstallFlow {
     if ($Script:ChkPerm.Checked) { Invoke-Step 'ตั้ง permission' { Grant-FullPermissions $Script:TxtInstallPath.Text } }
     if ($Script:ChkUpdate.Checked) {
         Invoke-Step 'อัปเดต JHCIS' {
-            $file = Get-Payload $Script:Payload.Updater @($Script:BaseDir)
+            $file = Get-Payload $Script:Payload.Updater @(@($Script:BaseDir, $Script:WorkDir) | Select-Object -Unique)
             if (-not $file) { return $false }
             $Script:Progress.Style = 'Marquee'
             Write-Log info 'กำลังรัน JHCIS_Update.exe ...'
-            $code = Invoke-Child $file
+            $code = Invoke-Child $file -WorkingDirectory (Split-Path $file)
             if ($code -ne 0) { Write-Log warn "JHCIS_Update.exe จบโดยไม่สำเร็จ (exit $code) - ดำเนินการต่อ" }
             else { Write-Log ok 'อัปเดต JHCIS เสร็จแล้ว' }
         }
@@ -754,11 +820,11 @@ function Invoke-InstallFlow {
     if ($Script:ChkJava.Checked) { Invoke-Step 'ปิด Java auto-update' { Disable-JavaUpdate } }
     if ($Script:StepFailures -eq 0) {
         Write-Log ok 'การติดตั้งเสร็จสิ้น'
-        [void][Windows.Forms.MessageBox]::Show("การติดตั้งเสร็จสิ้น`nเปิดโปรแกรม JHCIS จาก shortcut บน Desktop ได้เลย", 'JHCIS Installer', 'OK', 'Information')
+        [void][Windows.Forms.MessageBox]::Show($Script:Form, "การติดตั้งเสร็จสิ้น`nเปิดโปรแกรม JHCIS จาก shortcut บน Desktop ได้เลย", 'JHCIS Installer', 'OK', 'Information')
     } else {
         $msg = "เสร็จสิ้น แต่มี $($Script:StepFailures) ขั้นตอนล้มเหลว - ดูรายละเอียดใน log"
         Write-Log warn $msg
-        [void][Windows.Forms.MessageBox]::Show($msg, 'JHCIS Installer', 'OK', 'Warning')
+        [void][Windows.Forms.MessageBox]::Show($Script:Form, $msg, 'JHCIS Installer', 'OK', 'Warning')
     }
 }
 
@@ -808,7 +874,7 @@ $Script:Form.Add_Shown({
         Update-UninstallList
         if ($Script:IsServerMachine) {
             $msg = "เครื่องนี้มี JHCIS Server ติดตั้งอยู่ - โปรแกรมนี้ใช้กับเครื่องลูกเท่านั้น (จะไม่ถอน Java เพราะเครื่องแม่ต้องใช้)`n`nดำเนินการต่อจริงหรือไม่?"
-            if ([Windows.Forms.MessageBox]::Show($msg, 'JHCIS Installer', 'YesNo', 'Warning') -ne 'Yes') { $Script:Form.Close(); return }
+            if ([Windows.Forms.MessageBox]::Show($Script:Form, $msg, 'JHCIS Installer', 'YesNo', 'Warning') -ne 'Yes') { $Script:Form.Close(); return }
         }
         Start-Scan
     } catch { Write-Log err "ผิดพลาด: $($_.Exception.Message)" }
@@ -816,6 +882,12 @@ $Script:Form.Add_Shown({
 $Script:BtnScan.Add_Click({ try { Start-Scan } catch { Write-Log err "สแกนไม่สำเร็จ: $($_.Exception.Message)" } })
 $Script:BtnStart.Add_Click({
     try {
+        if ($Script:Scanning) {
+            $Script:StartQueued = $true
+            $Script:BtnStart.Enabled = $false
+            Write-Log info 'จะเริ่มติดตั้งทันทีที่สแกนเสร็จ'
+            return
+        }
         $Script:Running = $true; Set-UiBusy $true
         try { Invoke-InstallFlow }
         finally {
@@ -829,7 +901,7 @@ $Script:Form.Add_FormClosing({
     param($s, $e)
     try {
         if (-not $Script:Running) { return }
-        if ([Windows.Forms.MessageBox]::Show('กำลังติดตั้งอยู่ ปิดโปรแกรมจริงหรือไม่? (โปรแกรมติดตั้งที่เปิดอยู่จะทำงานต่อจนจบเอง)', 'JHCIS Installer', 'YesNo', 'Question') -ne 'Yes') { $e.Cancel = $true; return }
+        if ([Windows.Forms.MessageBox]::Show($Script:Form, 'กำลังติดตั้งอยู่ ปิดโปรแกรมจริงหรือไม่? (โปรแกรมติดตั้งที่เปิดอยู่จะทำงานต่อจนจบเอง)', 'JHCIS Installer', 'YesNo', 'Question') -ne 'Yes') { $e.Cancel = $true; return }
         if ($null -ne $Script:ActiveWebClient) {
             try { $Script:ActiveWebClient.CancelAsync() } catch { }
             Start-Sleep -Milliseconds 500   # let WebClient close the .part stream

@@ -5,6 +5,9 @@ dist/
 # Official JHCIS installers (download from https://jhcis.moph.go.th/download/)
 JHCIS-install-jre_jdk_64/
 JHCIS_Update.exe
+jhcis-install-client-*.exe
+*.part
+.write-test-*
 
 # brainstorming mockups
 .superpowers/
