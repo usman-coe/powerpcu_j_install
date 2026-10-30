@@ -397,6 +397,68 @@ function Resolve-PayloadFile([string]$Name, [string]$Sha256, [long]$Size, [strin
 }
 $Script:WorkDir = Get-WritableDir $Script:BaseDir
 $Script:LogFile = Join-Path $Script:WorkDir 'jhcis-installer.log'
+
+function Uninstall-App([pscustomobject]$App) {
+    $cmd = Get-SilentUninstallCommand $App.Uninstall
+    if ($null -eq $cmd) { Write-Log err "ไม่รู้วิธีถอน $($App.Name) - กรุณาถอนเองใน Control Panel"; return $false }
+    Write-Log info "กำลังถอนการติดตั้ง $($App.Name) ..."
+    $code = Invoke-Child $cmd.FilePath $cmd.Arguments -Hidden
+    if ($code -eq 3010) { Write-Log ok "ถอน $($App.Name) แล้ว (ควร restart เครื่องภายหลัง)"; return $true }
+    if ($code -in 0, 1605) { Write-Log ok "ถอน $($App.Name) แล้ว"; return $true }
+    Write-Log err "ถอน $($App.Name) ไม่สำเร็จ (exit $code)"
+    return $false
+}
+
+function Grant-FullPermissions([string]$Path) {
+    $Path = $Path.TrimEnd('\')
+    if (-not (Test-Path -LiteralPath $Path -PathType Container)) { Write-Log err "ไม่พบโฟลเดอร์: $Path"; return $false }
+    Write-Log info "อัปเดท permission สำหรับ $Path"
+    $icArgs = "`"$Path`" /T /C /Q /grant *S-1-5-32-545:(OI)(CI)F /grant *S-1-5-32-544:(OI)(CI)F"
+    if ($env:USERNAME) { $icArgs += " /grant `"$env:USERNAME`":(OI)(CI)F" }
+    $code = Invoke-Child 'icacls.exe' $icArgs -Hidden
+    if ($code -eq 0) { Write-Log ok "อัปเดท permission สำเร็จ - Users / Administrators / $env:USERNAME ได้ Full Control"; return $true }
+    Write-Log err "ไม่สามารถอัปเดท permission ได้ (exit code = $code)"
+    return $false
+}
+
+function Get-GetdownText([string]$Url = $Script:GetdownUrl, [int]$TimeoutMs = 10000) {
+    try {
+        $resp = Invoke-WebRequest -Uri $Url -UseBasicParsing -TimeoutSec ([math]::Ceiling($TimeoutMs / 1000))
+        if (Test-GetdownContent $resp.Content) { Write-Log ok 'ดาวน์โหลด getdown.txt ล่าสุดจากเว็บกรมฯ แล้ว'; return $resp.Content }
+        Write-Log warn 'ไฟล์ getdown.txt จากเว็บไม่ถูกต้อง - ใช้ไฟล์ที่แนบมากับโปรแกรมแทน'
+    } catch {
+        Write-Log warn 'ดาวน์โหลด getdown.txt ไม่ได้ (ไม่มีอินเทอร์เน็ต?) - ใช้ไฟล์ที่แนบมากับโปรแกรมแทน'
+    }
+    return $Script:GetdownFallback
+}
+
+function Set-GetdownFile([string]$InstallPath, [string]$Text) {
+    if (-not (Test-Path -LiteralPath $InstallPath -PathType Container)) { Write-Log err "ไม่พบโฟลเดอร์: $InstallPath"; return $false }
+    $target = Join-Path $InstallPath 'getdown.txt'
+    try {
+        if (Test-Path -LiteralPath $target) { Copy-Item -LiteralPath $target "$target.bak" -Force }
+        [IO.File]::WriteAllText($target, $Text, (New-Object Text.UTF8Encoding $false))
+        Write-Log ok "วาง getdown.txt ที่ $target แล้ว"
+        return $true
+    } catch {
+        Write-Log err "เขียน getdown.txt ไม่สำเร็จ: $($_.Exception.Message)"
+        return $false
+    }
+}
+
+function Disable-JavaUpdate {
+    $failed = 0
+    foreach ($root in 'HKLM\SOFTWARE', 'HKLM\SOFTWARE\WOW6432Node') {
+        $policy = "$root\JavaSoft\Java Update\Policy"
+        foreach ($name in 'EnableJavaUpdate', 'EnableAutoUpdateCheck', 'NotifyDownload', 'NotifyInstall') {
+            if ((Invoke-Child 'reg.exe' "add `"$policy`" /v $name /t REG_DWORD /d 0 /f" -Hidden) -ne 0) { $failed++ }
+        }
+        Invoke-Child 'reg.exe' "delete `"$root\Microsoft\Windows\CurrentVersion\Run`" /v SunJavaUpdateSched /f" -Hidden | Out-Null
+    }
+    if ($failed -ge 1) { Write-Log err "ปิด Java auto-update ไม่สำเร็จ $failed รายการ (ต้องใช้สิทธิ์ Administrator)"; return $false }
+    Write-Log ok 'ปิด Java auto-update แล้ว (คง JRE 1.8 ไว้สำหรับ JHCIS)'
+    return $true
+}
 #endregion
 
 #region SelfTest
@@ -527,6 +589,20 @@ function Invoke-SelfTest {
     Assert-Equal (Resolve-PayloadFile -Name 'p.bin' -Sha256 ('0'*64) -Size 1 -Url $url -SearchDirs @($d1) -DownloadDir $d1 -ConfirmUseMismatch { $true }) $got 'payload local mismatch, user accepts'
     Assert-Equal (Resolve-PayloadFile -Name 'p.bin' -Sha256 $sha -Size 1 -Url 'file:///Z:/missing.bin' -SearchDirs @($d2) -DownloadDir $d2) $null 'payload download failure -> null'
     Remove-Item $src, $d1, $d2 -Recurse -Force
+    $gd = Join-Path $env:TEMP ("getdown-{0}" -f [guid]::NewGuid()); New-Item -ItemType Directory $gd | Out-Null
+    Assert-True (Set-GetdownFile $gd 'appbase = one') 'getdown write first'
+    Assert-True (Set-GetdownFile $gd 'appbase = two') 'getdown write second'
+    Assert-Equal (Get-Content (Join-Path $gd 'getdown.txt') -Raw) 'appbase = two' 'getdown current content'
+    Assert-Equal (Get-Content (Join-Path $gd 'getdown.txt.bak') -Raw) 'appbase = one' 'getdown backup content'
+    Assert-Equal ((Get-Content (Join-Path $gd 'getdown.txt') -Encoding Byte -TotalCount 3) -join ',') '97,112,112' 'getdown no BOM'
+    Assert-True (-not (Set-GetdownFile (Join-Path $gd 'missing') 'x')) 'getdown missing dir -> false'
+    Assert-Equal (Get-GetdownText 'http://127.0.0.1:9/getdown.txt' 1000) $Script:GetdownFallback 'getdown unreachable -> fallback'
+    Assert-True (Grant-FullPermissions $gd) 'icacls on temp dir'
+    Assert-True (Grant-FullPermissions "$gd\") 'icacls trailing backslash'
+    Assert-True (-not (Grant-FullPermissions (Join-Path $gd 'missing'))) 'icacls missing -> false'
+    Assert-True (-not (Uninstall-App ([pscustomobject]@{Name='X';Version='';Uninstall='rundll32 foo';Kind='client'}))) 'uninstall unknown -> false'
+    Remove-Item $gd -Recurse -Force
+    if ($env:JHCIS_JAVA) { Assert-True (Disable-JavaUpdate) 'disable java update (admin)' }
     Write-Host "$($Script:Failed) failed"
     exit ([int]($Script:Failed -ne 0))
 }
