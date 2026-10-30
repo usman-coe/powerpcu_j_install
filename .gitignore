@@ -1,40 +1,6 @@
-# dependencies (bun install)
-node_modules
-
-# output
-out
-dist
-*.tgz
-
-# code coverage
-coverage
-*.lcov
-
-# logs
-logs
-_.log
-report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
-
-# dotenv environment variable files
-.env
-.env.development.local
-.env.test.local
-.env.production.local
-.env.local
-
-# caches
-.eslintcache
-.cache
-*.tsbuildinfo
-
-# IntelliJ based IDEs
-.idea
-
-# Finder (MacOS) folder config
-.DS_Store
-
-# bun compile leftovers
-*.bun-build
+# build output and logs
+dist/
+*.log
 
 # Official JHCIS installers (download from https://jhcis.moph.go.th/download/)
 JHCIS-install-jre_jdk_64/
@@ -42,3 +8,7 @@ JHCIS_Update.exe
 
 # brainstorming mockups
 .superpowers/
+
+# IDE / OS
+.idea
+.DS_Store
