@@ -1,5 +1,5 @@
 ﻿#requires -Version 5.1
-param([switch]$SelfTest)
+param([switch]$SelfTest, [switch]$NoElevate)
 Set-StrictMode -Version 2
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Windows.Forms, System.Drawing
@@ -186,6 +186,14 @@ function Write-Log {
     $line = "{0:HH:mm:ss} {1} {2}" -f (Get-Date), $sym, $Message
     if ($SelfTest) { Write-Host $line }
     try { Add-Content -Path $Script:LogFile -Value $line -Encoding UTF8 } catch { }
+    if ($null -ne $Script:LogBox -and -not $Script:LogBox.IsDisposed) {
+        try {
+            $Script:LogBox.SelectionStart = $Script:LogBox.TextLength
+            $Script:LogBox.SelectionColor = [Drawing.Color]::FromName(@{ ok = 'Green'; err = 'Red'; warn = 'DarkOrange'; info = 'Black' }[$Level])
+            $Script:LogBox.AppendText($line + "`r`n")
+            $Script:LogBox.ScrollToCaret()
+        } catch { }
+    }
 }
 #endregion
 
@@ -610,7 +618,187 @@ if ($SelfTest) { Invoke-SelfTest }
 #endregion
 
 #region Elevation
+$Script:IsAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+if (-not $Script:IsAdmin -and $PSCommandPath -and -not $NoElevate) {
+    try { Start-Process powershell -Verb RunAs -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`"" }
+    catch { Write-Log err "ขอสิทธิ์ Administrator ไม่สำเร็จ: $($_.Exception.Message)" }
+    exit
+}
 #endregion
 
 #region UI
+[Windows.Forms.Application]::EnableVisualStyles()
+$Script:Running = $false
+$Script:InstalledApps = @()
+$Script:IsServerMachine = $false
+$Script:UninstallList = @()
+$Script:DlName = ''
+$Script:LastPct = -1
+
+function New-Ctl([string]$Type, $Parent, [int]$X, [int]$Y, [int]$W, [int]$H, [string]$Text = '') {
+    $c = New-Object "Windows.Forms.$Type"
+    $c.Location = New-Object Drawing.Point($X, $Y)
+    $c.Size = New-Object Drawing.Size($W, $H)
+    $c.Text = $Text
+    $Parent.Controls.Add($c)
+    return $c
+}
+function Set-UiBusy([bool]$Busy) {
+    foreach ($c in @($Script:CboServer, $Script:BtnScan, $Script:TxtPort, $Script:TxtInstallPath, $Script:ChkInstall, $Script:ChkPerm, $Script:ChkUpdate, $Script:ChkGetdown, $Script:ChkJava, $Script:BtnStart)) { $c.Enabled = -not $Busy }
+    $Script:ChkUninstall.Enabled = (-not $Busy) -and $Script:UninstallList.Count -gt 0
+    if ($Busy) { $Script:Progress.Style = 'Marquee' }
+    else { $Script:Progress.Style = 'Continuous'; $Script:Progress.Value = 0 }
+}
+function Start-Scan {
+    Set-UiBusy $true
+    $Script:BtnStart.Enabled = $true   # spec 5: กดเริ่มติดตั้งได้โดยไม่ต้องรอสแกนเสร็จ
+    try {
+        $found = @(Find-MysqlServers (ConvertTo-Port $Script:TxtPort.Text) -OnProgress {
+            param($done, $total, $cnt)
+            if ($total -gt 0) {
+                $Script:Progress.Style = 'Continuous'
+                $Script:Progress.Maximum = $total
+                $Script:Progress.Value = [Math]::Min($done, $total)
+            }
+        })
+        $Script:CboServer.Items.Clear()
+        foreach ($s in $found) { [void]$Script:CboServer.Items.Add("$($s.Host) ($($s.Version))") }
+        if ($found.Count -gt 0) { $Script:CboServer.SelectedIndex = 0 }
+        else { Write-Log warn 'ไม่พบ MySQL server ในวงแลน - พิมพ์ IP เครื่องแม่เองในช่อง IP' }
+    } finally { Set-UiBusy $false }
+}
+$Script:OnDownload = {
+    param($done, $total)
+    $pct = 0
+    if ($total -gt 0) { $pct = [int][Math]::Min(100, [Math]::Floor($done * 100 / $total)) }
+    $Script:Progress.Style = 'Continuous'; $Script:Progress.Maximum = 100; $Script:Progress.Value = $pct
+    $step = $pct - ($pct % 10)
+    if ($step -ne $Script:LastPct) {
+        $Script:LastPct = $step
+        if ($step -gt 0) { Write-Log info "ดาวน์โหลด $($Script:DlName) ... $step%" }
+    }
+}
+function Get-Payload($P, [string[]]$SearchDirs) {
+    $Script:DlName = $P.Name; $Script:LastPct = -1
+    return Resolve-PayloadFile -Name $P.Name -Sha256 $P.Sha256 -Size $P.Size -Url "$($Script:PayloadBase)/$($P.Name)" -SearchDirs $SearchDirs -DownloadDir $Script:WorkDir -OnProgress $Script:OnDownload
+}
+function Invoke-Step([string]$Title, [scriptblock]$Body) {
+    $Script:Progress.Style = 'Marquee'
+    try { & $Body | Out-Null } catch { Write-Log err "$Title ไม่สำเร็จ: $($_.Exception.Message)" }
+}
+function Invoke-InstallFlow {
+    $Script:TxtInstallPath.Text = $Script:TxtInstallPath.Text.Trim()
+    if (-not $Script:TxtInstallPath.Text) { $Script:TxtInstallPath.Text = $Script:DefaultInstallPath }
+    if ($Script:ChkUninstall.Checked) {
+        foreach ($a in $Script:UninstallList) { Invoke-Step "ถอน $($a.Name)" { Uninstall-App $a } }
+    }
+    if ($Script:ChkInstall.Checked) {
+        Invoke-Step 'ติดตั้ง JHCIS Client' {
+            $file = Get-Payload $Script:Payload.Client @($Script:BaseDir, (Join-Path $Script:BaseDir 'JHCIS-install-jre_jdk_64\jHCIS-All-PCU'))
+            if (-not $file) { return }
+            $ip = Get-IpFromServerText $Script:CboServer.Text
+            if (-not $ip) { Write-Log warn 'ไม่ได้ระบุ IP เครื่องแม่ - ต้องกรอกค่า ODBC เองตอน installer ถาม'; $ip = '(ไม่พบ - กรอกเอง)' }
+            [void][Windows.Forms.MessageBox]::Show("เมื่อ installer ถามค่า ODBC ให้กรอก:`nIP = $ip`nPort = $(ConvertTo-Port $Script:TxtPort.Text)`nuser = root`npassword = $($Script:DefaultPassword)`ndatabase = jhcisdb", 'JHCIS Installer', 'OK', 'Information')
+            $Script:Progress.Style = 'Marquee'
+            Write-Log info 'กำลังรันตัวติดตั้ง JHCIS Client ...'
+            if ((Invoke-Child $file) -ne 0) { Write-Log warn 'ตัวติดตั้งจบโดยไม่สำเร็จ - ดำเนินการต่อ (อาจเป็นเพราะปิด installer ก่อนติดตั้งเสร็จ)' }
+            else { Write-Log ok 'ตัวติดตั้ง JHCIS Client ทำงานเสร็จแล้ว' }
+            $found = Find-InstallPath
+            if ($found -and $Script:TxtInstallPath.Text -eq $Script:DefaultInstallPath) { $Script:TxtInstallPath.Text = $found }
+        }
+    }
+    if ($Script:ChkPerm.Checked) { Invoke-Step 'ตั้ง permission' { Grant-FullPermissions $Script:TxtInstallPath.Text } }
+    if ($Script:ChkUpdate.Checked) {
+        Invoke-Step 'อัปเดต JHCIS' {
+            $file = Get-Payload $Script:Payload.Updater @($Script:BaseDir)
+            if (-not $file) { return }
+            $Script:Progress.Style = 'Marquee'
+            Write-Log info 'กำลังรัน JHCIS_Update.exe ...'
+            $code = Invoke-Child $file
+            if ($code -ne 0) { Write-Log warn "JHCIS_Update.exe จบโดยไม่สำเร็จ (exit $code) - ดำเนินการต่อ" }
+            else { Write-Log ok 'อัปเดต JHCIS เสร็จแล้ว' }
+        }
+    }
+    if ($Script:ChkGetdown.Checked) { Invoke-Step 'วาง getdown.txt' { Set-GetdownFile $Script:TxtInstallPath.Text (Get-GetdownText) } }
+    if ($Script:ChkJava.Checked) { Invoke-Step 'ปิด Java auto-update' { Disable-JavaUpdate } }
+    Write-Log ok 'การติดตั้งเสร็จสิ้น'
+    [void][Windows.Forms.MessageBox]::Show("การติดตั้งเสร็จสิ้น`nเปิดโปรแกรม JHCIS จาก shortcut บน Desktop ได้เลย", 'JHCIS Installer', 'OK', 'Information')
+}
+
+$Script:Form = New-Object Windows.Forms.Form
+$Script:Form.Text = "ติดตั้ง JHCIS Client v$($Script:Version)"
+$Script:Form.ClientSize = New-Object Drawing.Size(560, 680)
+$Script:Form.FormBorderStyle = 'FixedSingle'
+$Script:Form.MaximizeBox = $false
+$Script:Form.StartPosition = 'CenterScreen'
+$Script:Form.Font = New-Object Drawing.Font('Segoe UI', 10)
+
+$grp = New-Ctl GroupBox $Script:Form 12 8 536 122 'เครื่องแม่ (MySQL Server)'
+[void](New-Ctl Label $grp 12 30 44 24 'IP')
+$Script:CboServer = New-Ctl ComboBox $grp 60 27 330 26
+$Script:CboServer.DropDownStyle = 'DropDown'
+$Script:BtnScan = New-Ctl Button $grp 400 25 122 30 'สแกนใหม่'
+[void](New-Ctl Label $grp 12 68 44 24 'Port')
+$Script:TxtPort = New-Ctl TextBox $grp 60 65 70 26 ([string]$Script:DefaultPort)
+$Script:LblOdbc = New-Ctl Label $grp 140 62 382 52 "ค่าที่ต้องกรอกตอน installer ถาม ODBC: user=root  password=$($Script:DefaultPassword)  database=jhcisdb"
+
+$grp = New-Ctl GroupBox $Script:Form 12 138 536 222 'ขั้นตอน'
+$Script:ChkUninstall = New-Ctl CheckBox $grp 14 26 510 28 'ถอน JHCIS Client / Java ตัวเดิม'
+$Script:ChkInstall = New-Ctl CheckBox $grp 14 58 510 28 'ติดตั้ง JHCIS Client'
+$Script:ChkPerm = New-Ctl CheckBox $grp 14 90 216 28 'ตั้ง permission โฟลเดอร์'
+$Script:TxtInstallPath = New-Ctl TextBox $grp 232 90 290 26
+$Script:ChkUpdate = New-Ctl CheckBox $grp 14 122 510 28 'อัปเดต JHCIS เป็น version ใหม่ (JHCIS_Update.exe)'
+$Script:ChkGetdown = New-Ctl CheckBox $grp 14 154 510 28 'วาง getdown.txt (แก้ปัญหาเปิด JHCIS ไม่ได้)'
+$Script:ChkJava = New-Ctl CheckBox $grp 14 186 510 28 'ปิด Java auto-update (JHCIS ต้องใช้ JRE 1.8)'
+foreach ($c in @($Script:ChkUninstall, $Script:ChkInstall, $Script:ChkPerm, $Script:ChkUpdate, $Script:ChkGetdown, $Script:ChkJava)) { $c.Checked = $true }
+$found = Find-InstallPath
+$Script:TxtInstallPath.Text = if ($found) { $found } else { $Script:DefaultInstallPath }
+
+$Script:BtnStart = New-Ctl Button $Script:Form 12 370 406 40 '▶ เริ่มติดตั้ง'
+$Script:BtnClose = New-Ctl Button $Script:Form 428 370 120 40 'ปิด'
+$Script:Progress = New-Ctl ProgressBar $Script:Form 12 420 536 22
+$Script:LogBox = New-Ctl RichTextBox $Script:Form 12 452 536 216
+$Script:LogBox.ReadOnly = $true
+$Script:LogBox.ScrollBars = 'Vertical'
+$Script:LogBox.BackColor = [Drawing.Color]::White
+$Script:LogBox.Font = New-Object Drawing.Font('Segoe UI', 9)
+
+$Script:Form.Add_Shown({
+    try {
+        Write-Log info "=== เริ่มโปรแกรม v$($Script:Version) $(Get-Date -Format s) ==="
+        if (-not $Script:IsAdmin) { Write-Log warn 'โปรแกรมไม่ได้รันด้วยสิทธิ์ Administrator - บางขั้นตอนอาจล้มเหลว' }
+        $Script:InstalledApps = @(Get-InstalledApps)
+        $Script:IsServerMachine = @($Script:InstalledApps | Where-Object { $_.Kind -eq 'server' }).Count -gt 0
+        foreach ($a in $Script:InstalledApps) { Write-Log info "พบโปรแกรมที่ติดตั้งอยู่: $($a.Name)" }
+        if ($Script:InstalledApps.Count -eq 0) { Write-Log info 'ไม่พบ JHCIS / Java ที่ติดตั้งอยู่' }
+        if ($Script:IsServerMachine) {
+            $msg = "เครื่องนี้มี JHCIS Server ติดตั้งอยู่ - โปรแกรมนี้ใช้กับเครื่องลูกเท่านั้น (จะไม่ถอน Java เพราะเครื่องแม่ต้องใช้)`n`nดำเนินการต่อจริงหรือไม่?"
+            if ([Windows.Forms.MessageBox]::Show($msg, 'JHCIS Installer', 'YesNo', 'Warning') -ne 'Yes') { $Script:Form.Close(); return }
+        }
+        $Script:UninstallList = @($Script:InstalledApps | Where-Object { $_.Kind -eq 'client' }) + @($Script:InstalledApps | Where-Object { $_.Kind -eq 'java' -and -not $Script:IsServerMachine })
+        if ($Script:UninstallList.Count -gt 0) { $Script:ChkUninstall.Text = "ถอน JHCIS Client / Java ตัวเดิม  (พบ $($Script:UninstallList.Count) รายการ)" }
+        else { $Script:ChkUninstall.Text = 'ถอน JHCIS Client / Java ตัวเดิม  (ไม่พบของเดิม)'; $Script:ChkUninstall.Checked = $false; $Script:ChkUninstall.Enabled = $false }
+        Start-Scan
+    } catch { Write-Log err "ผิดพลาด: $($_.Exception.Message)" }
+})
+$Script:BtnScan.Add_Click({ try { Start-Scan } catch { Write-Log err "สแกนไม่สำเร็จ: $($_.Exception.Message)" } })
+$Script:BtnStart.Add_Click({
+    try {
+        $Script:Running = $true; Set-UiBusy $true
+        try { Invoke-InstallFlow } finally { Set-UiBusy $false; $Script:Running = $false }
+    } catch { Write-Log err "ผิดพลาด: $($_.Exception.Message)" }
+})
+$Script:BtnClose.Add_Click({ try { $Script:Form.Close() } catch { Write-Log err "ผิดพลาด: $($_.Exception.Message)" } })
+$Script:Form.Add_FormClosing({
+    param($s, $e)
+    try {
+        if (-not $Script:Running) { return }
+        if ([Windows.Forms.MessageBox]::Show('กำลังติดตั้งอยู่ ปิดโปรแกรมจริงหรือไม่? (โปรแกรมติดตั้งที่เปิดอยู่จะทำงานต่อจนจบเอง)', 'JHCIS Installer', 'YesNo', 'Question') -ne 'Yes') { $e.Cancel = $true; return }
+        Write-Log warn 'ผู้ใช้ปิดโปรแกรมกลางคัน'
+        Remove-Item (Join-Path $Script:WorkDir '*.part') -ErrorAction SilentlyContinue
+        # flow ยังรันอยู่ใน DoEvents loop ซ้อน ถ้าแค่ปิดฟอร์ม flow จะทำขั้นถัดไปต่อโดยไม่มีหน้าต่าง; Exit ไม่ kill โปรแกรมลูก (Start-Process แยก process)
+        [Environment]::Exit(0)
+    } catch { Write-Log err "ผิดพลาด: $($_.Exception.Message)" }
+})
+[void][Windows.Forms.Application]::Run($Script:Form)
 #endregion
