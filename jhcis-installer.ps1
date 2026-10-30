@@ -177,7 +177,6 @@ java_version = 1080000
 
 #region Base paths
 $Script:BaseDir = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path ([Environment]::GetCommandLineArgs()[0]) }
-$Script:LogFile = Join-Path $Script:BaseDir 'jhcis-installer.log'
 #endregion
 
 #region Log
@@ -233,6 +232,66 @@ function Get-LanHosts([string]$Base, [string]$LocalIp) {
 #endregion
 
 #region System
+function Wait-UiUntil([scriptblock]$Condition, [int]$TimeoutMs = -1, [scriptblock]$OnTick = $null) {
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    while ($true) {
+        [Windows.Forms.Application]::DoEvents()
+        if ($OnTick) { & $OnTick }
+        if (& $Condition) { return $true }
+        if ($TimeoutMs -ge 0 -and $sw.ElapsedMilliseconds -ge $TimeoutMs) { return $false }
+        Start-Sleep -Milliseconds 50
+    }
+}
+function Invoke-Child([string]$FilePath, [string]$Arguments = '', [switch]$Hidden, [string]$WorkingDirectory = '') {
+    $sp = @{ FilePath = $FilePath; PassThru = $true }
+    if ($Arguments) { $sp.ArgumentList = $Arguments }
+    if ($Hidden) { $sp.WindowStyle = 'Hidden' }
+    if ($WorkingDirectory) { $sp.WorkingDirectory = $WorkingDirectory }
+    try { $p = Start-Process @sp }
+    catch { Write-Log err "รันไม่สำเร็จ: $FilePath - $($_.Exception.Message)"; return -1 }
+    Wait-UiUntil { $p.HasExited } | Out-Null
+    return [int]$p.ExitCode
+}
+function Get-WritableDir([string]$Preferred) {
+    try {
+        if (-not (Test-Path -LiteralPath $Preferred -PathType Container)) { return $env:TEMP }
+        $t = Join-Path $Preferred ".write-test-$([guid]::NewGuid())"
+        [IO.File]::WriteAllText($t, 'x'); Remove-Item -LiteralPath $t
+        return $Preferred
+    } catch { return $env:TEMP }
+}
+function Get-InstalledApps {
+    $keys = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*', 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*'
+    $out = foreach ($r in @(Get-ItemProperty $keys -ErrorAction SilentlyContinue)) {
+        $v = @{}
+        foreach ($n in 'DisplayName', 'DisplayVersion', 'UninstallString') {
+            $pr = $r.PSObject.Properties[$n]; $v[$n] = if ($pr -and $pr.Value) { [string]$pr.Value } else { '' }
+        }
+        if (-not $v.DisplayName -or -not $v.UninstallString) { continue }
+        $k = Get-AppKind $v.DisplayName
+        if ($null -eq $k) { continue }
+        [pscustomobject]@{ Name = $v.DisplayName; Version = $v.DisplayVersion; Uninstall = $v.UninstallString; Kind = $k }
+    }
+    return @($out)
+}
+function Find-InstallPath {
+    foreach ($c in $Script:InstallPathCandidates) { if (Test-Path -LiteralPath $c) { return $c } }
+    return $null
+}
+function Get-SubnetBases {
+    $seen = @{}
+    $out = foreach ($a in @(Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue)) {
+        $ip = [string]$a.IPAddress
+        if ($a.PrefixOrigin -eq 'WellKnown' -or $ip.StartsWith('127.') -or $ip.StartsWith('169.254.')) { continue }
+        $base = ($ip -replace '\d+$', '')
+        if ($seen.ContainsKey($base)) { continue }
+        $seen[$base] = $true
+        [pscustomobject]@{ Base = $base; LocalIp = $ip; Interface = $a.InterfaceAlias }
+    }
+    return @($out)
+}
+$Script:WorkDir = Get-WritableDir $Script:BaseDir
+$Script:LogFile = Join-Path $Script:WorkDir 'jhcis-installer.log'
 #endregion
 
 #region SelfTest
@@ -297,6 +356,21 @@ function Invoke-SelfTest {
     Assert-Equal $hosts[0] '192.168.1.1' 'lan first'
     Assert-Equal $hosts[-1] '192.168.1.254' 'lan last'
     Assert-True ($hosts -notcontains '192.168.1.37') 'lan excludes self'
+
+    Assert-Equal (Invoke-Child 'cmd.exe' '/c exit 3' -Hidden) 3 'child exit code'
+    Assert-Equal (Invoke-Child 'C:\definitely\missing.exe' '' -Hidden) -1 'child missing -> -1'
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    Assert-True (-not (Wait-UiUntil { $false } 300)) 'wait timeout returns false'
+    Assert-True ($sw.ElapsedMilliseconds -ge 250) 'wait actually waited'
+    Assert-True (Wait-UiUntil { $true } 1000) 'wait condition true'
+    Assert-Equal (Get-WritableDir 'Z:\no\such\dir') $env:TEMP 'writable dir fallback'
+    Assert-Equal (Get-WritableDir $env:TEMP) $env:TEMP 'writable dir ok'
+    $apps = @(Get-InstalledApps)
+    Assert-True (@($apps | ? { $_.Kind -notin 'client','server','java' }).Count -eq 0) 'installed apps kinds filtered'
+    $subs = @(Get-SubnetBases)
+    Assert-True (@($subs | ? { $_.Base -notmatch '^\d+\.\d+\.\d+\.$' }).Count -eq 0) 'subnet base format'
+    Assert-True (@($subs | ? { $_.Base -like '127.*' -or $_.Base -like '169.254.*' }).Count -eq 0) 'subnet excludes loopback/apipa'
+    Assert-True ((Find-InstallPath) -eq $null -or (Test-Path (Find-InstallPath))) 'find install path sane'
     Write-Host "$($Script:Failed) failed"
     exit ([int]($Script:Failed -ne 0))
 }
