@@ -249,7 +249,10 @@ function Invoke-Child([string]$FilePath, [string]$Arguments = '', [switch]$Hidde
     if ($WorkingDirectory) { $sp.WorkingDirectory = $WorkingDirectory }
     try { $p = Start-Process @sp }
     catch { Write-Log err "รันไม่สำเร็จ: $FilePath - $($_.Exception.Message)"; return -1 }
+    $null = $p.Handle   # cache handle so ExitCode stays readable for quick exits
     Wait-UiUntil { $p.HasExited } | Out-Null
+    $p.WaitForExit()
+    if ($null -eq $p.ExitCode) { return -1 }
     return [int]$p.ExitCode
 }
 function Get-WritableDir([string]$Preferred) {
@@ -358,6 +361,7 @@ function Invoke-SelfTest {
     Assert-True ($hosts -notcontains '192.168.1.37') 'lan excludes self'
 
     Assert-Equal (Invoke-Child 'cmd.exe' '/c exit 3' -Hidden) 3 'child exit code'
+    Assert-Equal (Invoke-Child 'cmd.exe' '/c exit 7' -Hidden) 7 'child exit code quick exit'
     Assert-Equal (Invoke-Child 'C:\definitely\missing.exe' '' -Hidden) -1 'child missing -> -1'
     $sw = [Diagnostics.Stopwatch]::StartNew()
     Assert-True (-not (Wait-UiUntil { $false } 300)) 'wait timeout returns false'
