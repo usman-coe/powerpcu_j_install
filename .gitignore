@@ -39,3 +39,6 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 # Official JHCIS installers (download from https://jhcis.moph.go.th/download/)
 JHCIS-install-jre_jdk_64/
 JHCIS_Update.exe
+
+# brainstorming mockups
+.superpowers/
