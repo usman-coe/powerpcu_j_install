@@ -19,6 +19,7 @@ $Script:DefaultInstallPath = 'C:\Program Files\jhcis-client'
 $Script:InstallPathCandidates = @('C:\Program Files\jhcis-client','C:\Program Files (x86)\jhcis-client','C:\JHCIS','C:\jhcis','C:\JHCIS-Client','C:\Program Files\JHCIS','C:\Program Files (x86)\JHCIS')
 $Script:GetdownUrl = 'https://jhcis.moph.go.th/files/getdown.txt'
 $Script:LogBox = $null
+$Script:ActiveWebClient = $null
 $Script:GetdownFallback = @'
 # JHCIS Update Configuration
 appbase = https://7-sada.github.io/jhcis-update/
@@ -224,7 +225,19 @@ function Test-GetdownContent([string]$Text) {
     return ($Text -match 'appbase\s*=') -and ($Text -notmatch '<html')
 }
 function Test-FileSha256([string]$Path, [string]$Expected) {
-    try { return (Get-FileHash -Path $Path -Algorithm SHA256).Hash -ieq $Expected } catch { return $false }
+    $fs = $null; $sha = $null
+    try {
+        $fs = [IO.File]::OpenRead($Path)
+        $sha = [Security.Cryptography.SHA256]::Create()
+        $buf = New-Object byte[] 4194304
+        while (($n = $fs.Read($buf, 0, $buf.Length)) -gt 0) {
+            [void]$sha.TransformBlock($buf, 0, $n, $null, 0)
+            [Windows.Forms.Application]::DoEvents()   # keep the window responsive while hashing 400+ MB
+        }
+        [void]$sha.TransformFinalBlock($buf, 0, 0)
+        return ([BitConverter]::ToString($sha.Hash) -replace '-', '') -ieq $Expected
+    } catch { return $false }
+    finally { if ($null -ne $fs) { $fs.Dispose() }; if ($null -ne $sha) { $sha.Dispose() } }
 }
 function ConvertTo-Port([string]$Text) {
     $n = 0
@@ -379,6 +392,7 @@ function Resolve-PayloadFile([string]$Name, [string]$Sha256, [long]$Size, [strin
         Remove-Item -LiteralPath $part -Force -ErrorAction SilentlyContinue
         Write-Log info "กำลังดาวน์โหลด $Name ($([math]::Round($Size/1MB)) MB) ..."
         $wc = New-Object Net.WebClient
+        $Script:ActiveWebClient = $wc
         try {
             $task = $wc.DownloadFileTaskAsync($Url, $part)
             Wait-UiUntil { $task.IsCompleted } -OnTick {
@@ -390,7 +404,7 @@ function Resolve-PayloadFile([string]$Name, [string]$Sha256, [long]$Size, [strin
                 Remove-Item -LiteralPath $part -Force -ErrorAction SilentlyContinue
                 return $null
             }
-        } finally { $wc.Dispose() }
+        } finally { $wc.Dispose(); $Script:ActiveWebClient = $null }
         if (Test-FileSha256 $part $Sha256) {
             Move-Item -LiteralPath $part -Destination $final -Force
             if ($OnProgress) { [void](& $OnProgress $Size $Size) }
@@ -515,6 +529,10 @@ function Invoke-SelfTest {
     Assert-True (-not (Test-FileSha256 $tmp ('0'*64))) 'sha mismatch'
     Assert-True (-not (Test-FileSha256 "$tmp.missing" ('0'*64))) 'sha missing file -> false'
     Remove-Item $tmp
+    $big = Join-Path $env:TEMP ("sha-big-{0}.bin" -f [guid]::NewGuid())
+    $bb = New-Object byte[] 9437185; (New-Object Random).NextBytes($bb); [IO.File]::WriteAllBytes($big, $bb)
+    Assert-True (Test-FileSha256 $big (Get-FileHash $big -Algorithm SHA256).Hash) 'sha multi-chunk (9 MB)'
+    Remove-Item $big
 
     Assert-Equal (ConvertTo-Port '3306') 3306 'port ok'
     Assert-Equal (ConvertTo-Port '') 3333 'port empty'
@@ -620,7 +638,7 @@ if ($SelfTest) { Invoke-SelfTest }
 #region Elevation
 $Script:IsAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 if (-not $Script:IsAdmin -and $PSCommandPath -and -not $NoElevate) {
-    try { Start-Process powershell -Verb RunAs -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`"" }
+    try { Start-Process powershell -Verb RunAs -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`" -NoElevate" }
     catch { Write-Log err "ขอสิทธิ์ Administrator ไม่สำเร็จ: $($_.Exception.Message)" }
     exit
 }
@@ -634,6 +652,8 @@ $Script:IsServerMachine = $false
 $Script:UninstallList = @()
 $Script:DlName = ''
 $Script:LastPct = -1
+$Script:StepFailures = 0
+$Script:PrefillPath = $Script:DefaultInstallPath
 
 function New-Ctl([string]$Type, $Parent, [int]$X, [int]$Y, [int]$W, [int]$H, [string]$Text = '') {
     $c = New-Object "Windows.Forms.$Type"
@@ -684,9 +704,20 @@ function Get-Payload($P, [string[]]$SearchDirs) {
 }
 function Invoke-Step([string]$Title, [scriptblock]$Body) {
     $Script:Progress.Style = 'Marquee'
-    try { & $Body | Out-Null } catch { Write-Log err "$Title ไม่สำเร็จ: $($_.Exception.Message)" }
+    try { $r = @(& $Body) } catch { Write-Log err "$Title ไม่สำเร็จ: $($_.Exception.Message)"; $Script:StepFailures++; return }
+    if ($r -contains $false) { $Script:StepFailures++ }
+}
+function Update-UninstallList {
+    $Script:InstalledApps = @(Get-InstalledApps)
+    $Script:IsServerMachine = @($Script:InstalledApps | Where-Object { $_.Kind -eq 'server' }).Count -gt 0
+    foreach ($a in $Script:InstalledApps) { Write-Log info "พบโปรแกรมที่ติดตั้งอยู่: $($a.Name)" }
+    if ($Script:InstalledApps.Count -eq 0) { Write-Log info 'ไม่พบ JHCIS / Java ที่ติดตั้งอยู่' }
+    $Script:UninstallList = @($Script:InstalledApps | Where-Object { $_.Kind -eq 'client' }) + @($Script:InstalledApps | Where-Object { $_.Kind -eq 'java' -and -not $Script:IsServerMachine })
+    if ($Script:UninstallList.Count -gt 0) { $Script:ChkUninstall.Text = "ถอน JHCIS Client / Java ตัวเดิม  (พบ $($Script:UninstallList.Count) รายการ)" }
+    else { $Script:ChkUninstall.Text = 'ถอน JHCIS Client / Java ตัวเดิม  (ไม่พบของเดิม)'; $Script:ChkUninstall.Checked = $false; $Script:ChkUninstall.Enabled = $false }
 }
 function Invoke-InstallFlow {
+    $Script:StepFailures = 0
     $Script:TxtInstallPath.Text = $Script:TxtInstallPath.Text.Trim()
     if (-not $Script:TxtInstallPath.Text) { $Script:TxtInstallPath.Text = $Script:DefaultInstallPath }
     if ($Script:ChkUninstall.Checked) {
@@ -695,7 +726,7 @@ function Invoke-InstallFlow {
     if ($Script:ChkInstall.Checked) {
         Invoke-Step 'ติดตั้ง JHCIS Client' {
             $file = Get-Payload $Script:Payload.Client @($Script:BaseDir, (Join-Path $Script:BaseDir 'JHCIS-install-jre_jdk_64\jHCIS-All-PCU'))
-            if (-not $file) { return }
+            if (-not $file) { return $false }
             $ip = Get-IpFromServerText $Script:CboServer.Text
             if (-not $ip) { Write-Log warn 'ไม่ได้ระบุ IP เครื่องแม่ - ต้องกรอกค่า ODBC เองตอน installer ถาม'; $ip = '(ไม่พบ - กรอกเอง)' }
             [void][Windows.Forms.MessageBox]::Show("เมื่อ installer ถามค่า ODBC ให้กรอก:`nIP = $ip`nPort = $(ConvertTo-Port $Script:TxtPort.Text)`nuser = root`npassword = $($Script:DefaultPassword)`ndatabase = jhcisdb", 'JHCIS Installer', 'OK', 'Information')
@@ -704,14 +735,14 @@ function Invoke-InstallFlow {
             if ((Invoke-Child $file) -ne 0) { Write-Log warn 'ตัวติดตั้งจบโดยไม่สำเร็จ - ดำเนินการต่อ (อาจเป็นเพราะปิด installer ก่อนติดตั้งเสร็จ)' }
             else { Write-Log ok 'ตัวติดตั้ง JHCIS Client ทำงานเสร็จแล้ว' }
             $found = Find-InstallPath
-            if ($found -and $Script:TxtInstallPath.Text -eq $Script:DefaultInstallPath) { $Script:TxtInstallPath.Text = $found }
+            if ($found -and $Script:TxtInstallPath.Text.Trim() -eq $Script:PrefillPath) { $Script:TxtInstallPath.Text = $found; Write-Log info "ตรวจพบโฟลเดอร์ติดตั้งใหม่: $found" }
         }
     }
     if ($Script:ChkPerm.Checked) { Invoke-Step 'ตั้ง permission' { Grant-FullPermissions $Script:TxtInstallPath.Text } }
     if ($Script:ChkUpdate.Checked) {
         Invoke-Step 'อัปเดต JHCIS' {
             $file = Get-Payload $Script:Payload.Updater @($Script:BaseDir)
-            if (-not $file) { return }
+            if (-not $file) { return $false }
             $Script:Progress.Style = 'Marquee'
             Write-Log info 'กำลังรัน JHCIS_Update.exe ...'
             $code = Invoke-Child $file
@@ -721,8 +752,14 @@ function Invoke-InstallFlow {
     }
     if ($Script:ChkGetdown.Checked) { Invoke-Step 'วาง getdown.txt' { Set-GetdownFile $Script:TxtInstallPath.Text (Get-GetdownText) } }
     if ($Script:ChkJava.Checked) { Invoke-Step 'ปิด Java auto-update' { Disable-JavaUpdate } }
-    Write-Log ok 'การติดตั้งเสร็จสิ้น'
-    [void][Windows.Forms.MessageBox]::Show("การติดตั้งเสร็จสิ้น`nเปิดโปรแกรม JHCIS จาก shortcut บน Desktop ได้เลย", 'JHCIS Installer', 'OK', 'Information')
+    if ($Script:StepFailures -eq 0) {
+        Write-Log ok 'การติดตั้งเสร็จสิ้น'
+        [void][Windows.Forms.MessageBox]::Show("การติดตั้งเสร็จสิ้น`nเปิดโปรแกรม JHCIS จาก shortcut บน Desktop ได้เลย", 'JHCIS Installer', 'OK', 'Information')
+    } else {
+        $msg = "เสร็จสิ้น แต่มี $($Script:StepFailures) ขั้นตอนล้มเหลว - ดูรายละเอียดใน log"
+        Write-Log warn $msg
+        [void][Windows.Forms.MessageBox]::Show($msg, 'JHCIS Installer', 'OK', 'Warning')
+    }
 }
 
 $Script:Form = New-Object Windows.Forms.Form
@@ -752,7 +789,8 @@ $Script:ChkGetdown = New-Ctl CheckBox $grp 14 154 510 28 'วาง getdown.txt 
 $Script:ChkJava = New-Ctl CheckBox $grp 14 186 510 28 'ปิด Java auto-update (JHCIS ต้องใช้ JRE 1.8)'
 foreach ($c in @($Script:ChkUninstall, $Script:ChkInstall, $Script:ChkPerm, $Script:ChkUpdate, $Script:ChkGetdown, $Script:ChkJava)) { $c.Checked = $true }
 $found = Find-InstallPath
-$Script:TxtInstallPath.Text = if ($found) { $found } else { $Script:DefaultInstallPath }
+if ($found) { $Script:PrefillPath = $found }
+$Script:TxtInstallPath.Text = $Script:PrefillPath
 
 $Script:BtnStart = New-Ctl Button $Script:Form 12 370 406 40 '▶ เริ่มติดตั้ง'
 $Script:BtnClose = New-Ctl Button $Script:Form 428 370 120 40 'ปิด'
@@ -767,17 +805,11 @@ $Script:Form.Add_Shown({
     try {
         Write-Log info "=== เริ่มโปรแกรม v$($Script:Version) $(Get-Date -Format s) ==="
         if (-not $Script:IsAdmin) { Write-Log warn 'โปรแกรมไม่ได้รันด้วยสิทธิ์ Administrator - บางขั้นตอนอาจล้มเหลว' }
-        $Script:InstalledApps = @(Get-InstalledApps)
-        $Script:IsServerMachine = @($Script:InstalledApps | Where-Object { $_.Kind -eq 'server' }).Count -gt 0
-        foreach ($a in $Script:InstalledApps) { Write-Log info "พบโปรแกรมที่ติดตั้งอยู่: $($a.Name)" }
-        if ($Script:InstalledApps.Count -eq 0) { Write-Log info 'ไม่พบ JHCIS / Java ที่ติดตั้งอยู่' }
+        Update-UninstallList
         if ($Script:IsServerMachine) {
             $msg = "เครื่องนี้มี JHCIS Server ติดตั้งอยู่ - โปรแกรมนี้ใช้กับเครื่องลูกเท่านั้น (จะไม่ถอน Java เพราะเครื่องแม่ต้องใช้)`n`nดำเนินการต่อจริงหรือไม่?"
             if ([Windows.Forms.MessageBox]::Show($msg, 'JHCIS Installer', 'YesNo', 'Warning') -ne 'Yes') { $Script:Form.Close(); return }
         }
-        $Script:UninstallList = @($Script:InstalledApps | Where-Object { $_.Kind -eq 'client' }) + @($Script:InstalledApps | Where-Object { $_.Kind -eq 'java' -and -not $Script:IsServerMachine })
-        if ($Script:UninstallList.Count -gt 0) { $Script:ChkUninstall.Text = "ถอน JHCIS Client / Java ตัวเดิม  (พบ $($Script:UninstallList.Count) รายการ)" }
-        else { $Script:ChkUninstall.Text = 'ถอน JHCIS Client / Java ตัวเดิม  (ไม่พบของเดิม)'; $Script:ChkUninstall.Checked = $false; $Script:ChkUninstall.Enabled = $false }
         Start-Scan
     } catch { Write-Log err "ผิดพลาด: $($_.Exception.Message)" }
 })
@@ -785,7 +817,11 @@ $Script:BtnScan.Add_Click({ try { Start-Scan } catch { Write-Log err "สแก�
 $Script:BtnStart.Add_Click({
     try {
         $Script:Running = $true; Set-UiBusy $true
-        try { Invoke-InstallFlow } finally { Set-UiBusy $false; $Script:Running = $false }
+        try { Invoke-InstallFlow }
+        finally {
+            try { Update-UninstallList } catch { Write-Log err "ตรวจโปรแกรมที่ติดตั้งอยู่ไม่สำเร็จ: $($_.Exception.Message)" }
+            Set-UiBusy $false; $Script:Running = $false
+        }
     } catch { Write-Log err "ผิดพลาด: $($_.Exception.Message)" }
 })
 $Script:BtnClose.Add_Click({ try { $Script:Form.Close() } catch { Write-Log err "ผิดพลาด: $($_.Exception.Message)" } })
@@ -794,8 +830,12 @@ $Script:Form.Add_FormClosing({
     try {
         if (-not $Script:Running) { return }
         if ([Windows.Forms.MessageBox]::Show('กำลังติดตั้งอยู่ ปิดโปรแกรมจริงหรือไม่? (โปรแกรมติดตั้งที่เปิดอยู่จะทำงานต่อจนจบเอง)', 'JHCIS Installer', 'YesNo', 'Question') -ne 'Yes') { $e.Cancel = $true; return }
+        if ($null -ne $Script:ActiveWebClient) {
+            try { $Script:ActiveWebClient.CancelAsync() } catch { }
+            Start-Sleep -Milliseconds 500   # let WebClient close the .part stream
+        }
+        foreach ($pl in $Script:Payload.Values) { Remove-Item -LiteralPath (Join-Path $Script:WorkDir "$($pl.Name).part") -Force -ErrorAction SilentlyContinue }
         Write-Log warn 'ผู้ใช้ปิดโปรแกรมกลางคัน'
-        Remove-Item (Join-Path $Script:WorkDir '*.part') -ErrorAction SilentlyContinue
         # flow ยังรันอยู่ใน DoEvents loop ซ้อน ถ้าแค่ปิดฟอร์ม flow จะทำขั้นถัดไปต่อโดยไม่มีหน้าต่าง; Exit ไม่ kill โปรแกรมลูก (Start-Process แยก process)
         [Environment]::Exit(0)
     } catch { Write-Log err "ผิดพลาด: $($_.Exception.Message)" }
