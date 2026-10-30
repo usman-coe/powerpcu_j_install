@@ -293,6 +293,48 @@ function Get-SubnetBases {
     }
     return @($out)
 }
+function Read-MysqlHandshake([Net.Sockets.TcpClient]$Client) {
+    try {
+        $stream = $Client.GetStream()
+        $stream.ReadTimeout = 1500
+        $buf = New-Object byte[] 256
+        $n = $stream.Read($buf, 0, 256)
+        if ($n -le 0) { return $null }
+        return Get-MysqlVersionFromHandshake ([byte[]]$buf[0..($n - 1)])
+    } catch { return $null }
+}
+function Find-MysqlServers([int]$Port, [scriptblock]$OnProgress = $null) {
+    $results = New-Object Collections.ArrayList
+    $subs = @(Get-SubnetBases)
+    if ($subs.Count -eq 0) { Write-Log warn 'ไม่พบ network interface แบบ IPv4' }
+    foreach ($sub in $subs) {
+        Write-Log info "สแกน subnet $($sub.Base)0/24 ผ่าน $($sub.Interface)"
+        $pairs = New-Object Collections.ArrayList
+        foreach ($h in (Get-LanHosts $sub.Base $sub.LocalIp)) {
+            $c = New-Object Net.Sockets.TcpClient
+            [void]$pairs.Add([pscustomobject]@{ Host = $h; Client = $c; Task = $c.ConnectAsync($h, $Port) })
+        }
+        $total = $pairs.Count
+        Wait-UiUntil { @($pairs | Where-Object { -not $_.Task.IsCompleted }).Count -eq 0 } 800 -OnTick {
+            if ($OnProgress) {
+                $done = @($pairs | Where-Object { $_.Task.IsCompleted }).Count
+                & $OnProgress $done $total $results.Count
+            }
+        } | Out-Null
+        foreach ($p in $pairs) {
+            $t = $p.Task
+            if (-not ($t.IsCompleted -and -not $t.IsFaulted -and -not $t.IsCanceled -and $p.Client.Connected)) { continue }
+            $v = Read-MysqlHandshake $p.Client
+            if ($v -and -not (@($results | Where-Object { $_.Host -eq $p.Host }).Count)) {
+                [void]$results.Add([pscustomobject]@{ Host = $p.Host; Port = $Port; Version = $v })
+                Write-Log ok "พบ MySQL ที่ $($p.Host):$Port ($v)"
+            }
+        }
+        foreach ($p in $pairs) { try { $p.Client.Dispose() } catch { } }
+        Write-Log info "สแกน $($sub.Base)0/24 เสร็จ พบ $($results.Count) เครื่อง"
+    }
+    return @($results)
+}
 $Script:WorkDir = Get-WritableDir $Script:BaseDir
 $Script:LogFile = Join-Path $Script:WorkDir 'jhcis-installer.log'
 #endregion
@@ -375,6 +417,19 @@ function Invoke-SelfTest {
     Assert-True (@($subs | ? { $_.Base -notmatch '^\d+\.\d+\.\d+\.$' }).Count -eq 0) 'subnet base format'
     Assert-True (@($subs | ? { $_.Base -like '127.*' -or $_.Base -like '169.254.*' }).Count -eq 0) 'subnet excludes loopback/apipa'
     Assert-True ((Find-InstallPath) -eq $null -or (Test-Path (Find-InstallPath))) 'find install path sane'
+    $listener = New-Object Net.Sockets.TcpListener ([Net.IPAddress]::Loopback, 0); $listener.Start()
+    $lport = $listener.LocalEndpoint.Port
+    $accept = $listener.AcceptTcpClientAsync()
+    $cli = New-Object Net.Sockets.TcpClient; $conn = $cli.ConnectAsync('127.0.0.1', $lport)
+    Assert-True (Wait-UiUntil { $conn.IsCompleted -and $accept.IsCompleted } 3000) 'fake mysql connected'
+    $srv = $accept.Result
+    $hs = [byte[]](0x4A,0,0,0,0x0A) + [Text.Encoding]::ASCII.GetBytes('5.6.45-test') + [byte[]](0,1,2,3)
+    $srv.GetStream().Write($hs, 0, $hs.Length)
+    Assert-Equal (Read-MysqlHandshake $cli) '5.6.45-test' 'read handshake from socket'
+    $cli.Dispose(); $srv.Dispose(); $listener.Stop()
+    $cli2 = New-Object Net.Sockets.TcpClient
+    Assert-Equal (Read-MysqlHandshake $cli2) $null 'read handshake unconnected -> null'
+    if ($env:JHCIS_SCAN) { $sw=[Diagnostics.Stopwatch]::StartNew(); $r=@(Find-MysqlServers 3306); Write-Host "scan: $($r.Count) found in $($sw.ElapsedMilliseconds) ms: $($r | % { "$($_.Host) $($_.Version)" })" }
     Write-Host "$($Script:Failed) failed"
     exit ([int]($Script:Failed -ne 0))
 }
