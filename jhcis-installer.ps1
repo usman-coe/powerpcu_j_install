@@ -385,7 +385,7 @@ function Resolve-PayloadFile([string]$Name, [string]$Sha256, [long]$Size, [strin
         } finally { $wc.Dispose() }
         if (Test-FileSha256 $part $Sha256) {
             Move-Item -LiteralPath $part -Destination $final -Force
-            if ($OnProgress) { & $OnProgress $Size $Size }
+            if ($OnProgress) { [void](& $OnProgress $Size $Size) }
             Write-Log ok "ดาวน์โหลด $Name เสร็จแล้ว"
             return $final
         }
@@ -517,6 +517,9 @@ function Invoke-SelfTest {
     Assert-True ($Script:TestProg -ge 1) 'payload progress callback called'
     Assert-True (Test-FileSha256 $got $sha) 'payload downloaded sha ok'
     Assert-True (-not (Test-Path "$got.part")) 'payload no .part left'
+    $noisy = Resolve-PayloadFile -Name 'p.bin' -Sha256 $sha -Size $bytes.Length -Url $url -SearchDirs @() -DownloadDir $d1 -OnProgress { param($a,$b) 'noise' }
+    Assert-True ($noisy -is [string]) 'payload return is a plain string even when callback emits output'
+    Assert-Equal $noisy (Join-Path $d1 'p.bin') 'payload noisy callback path'
     Assert-Equal (Resolve-PayloadFile -Name 'p.bin' -Sha256 $sha -Size $bytes.Length -Url 'file:///Z:/missing.bin' -SearchDirs @($d1) -DownloadDir $d1) $got 'payload found locally, no download'
     $d2 = Join-Path $env:TEMP ("payload-d2-{0}" -f [guid]::NewGuid()); New-Item -ItemType Directory $d2 | Out-Null
     Assert-Equal (Resolve-PayloadFile -Name 'p.bin' -Sha256 ('0'*64) -Size $bytes.Length -Url $url -SearchDirs @($d2) -DownloadDir $d2) $null 'payload bad sha -> null'
