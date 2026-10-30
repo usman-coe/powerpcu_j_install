@@ -192,9 +192,9 @@ function Write-Log {
 
 #region Pure
 function Get-AppKind([string]$DisplayName) {
-    if ($DisplayName -imatch 'JHCIS.*Client') { return 'client' }
-    if ($DisplayName -imatch 'JHCIS.*Server') { return 'server' }
-    if ($DisplayName -imatch '^Java(\(TM\))?\s+(\d|SE Development Kit)' -and $DisplayName -inotmatch 'Auto Updater') { return 'java' }
+    if ($DisplayName -imatch '^JHCIS-Client') { return 'client' }
+    if ($DisplayName -imatch '^JHCIS-Server') { return 'server' }
+    if ($DisplayName -imatch '^Java(\(TM\))? (\d|SE)') { return 'java' }
     return $null
 }
 function Get-SilentUninstallCommand([string]$UninstallString) {
@@ -252,6 +252,8 @@ function Invoke-SelfTest {
     Assert-Equal (Get-AppKind 'JHCIS-Client-JRE-8.0.191_64bit 3.0.0') 'client' 'kind client'
     Assert-Equal (Get-AppKind 'JHCIS-Server-JRE-8.0.191_64bit 3.0.0') 'server' 'kind server'
     Assert-Equal (Get-AppKind 'MySQL Server 5.6') $null 'kind other'
+    Assert-Equal (Get-AppKind 'Java SE Runtime Environment 8') 'java' 'kind java se runtime'
+    Assert-Equal (Get-AppKind 'My JHCIS Client Tools') $null 'kind unanchored name excluded'
 
     $u = Get-SilentUninstallCommand 'MsiExec.exe /X{26A24AE4-039D-4CA4-87B4-2F64180191F0}'
     Assert-Equal $u.FilePath 'msiexec.exe' 'msi filepath'
